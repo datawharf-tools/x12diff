@@ -588,4 +588,69 @@ class RegressionTests {
         assertTrue("Mode: full" in readme && "(BGN08 4: full)" in readme)   // N7: the 834 example shows the current console format
         assertTrue("future end date also counts" in readme)
     }
+
+    // ================= REVIEW_3 =================
+
+    @Test
+    fun v1_classFilesTargetJava17() {
+        // The jar must run on Java 17: class file major version 61 (Java 21 would be 65).
+        val cls = Path.of("build", "classes", "kotlin", "main", "tools", "datawharf", "x12diff", "MainKt.class")
+        val bytes = Files.readAllBytes(cls)
+        val major = ((bytes[6].toInt() and 0xFF) shl 8) or (bytes[7].toInt() and 0xFF)
+        assertEquals(61, major)
+        assertTrue(Files.readString(Path.of("build.gradle.kts")).contains("jvmToolchain(17)"))
+    }
+
+    @Test
+    fun la_lb_readmeStatesPatientRespRuleAndDiffRowOrder() {
+        val readme = Files.readString(Path.of("README.md"), Charsets.UTF_8)
+        assertTrue("nothing but PR and the `recon.contractual` codes was adjusted" in readme)
+        assertTrue("then the ADDED rows, then the TERMED" in readme)
+        assertTrue("Java 17" in readme)
+    }
+
+    @Test
+    fun lb_diffCsvRowOrderIsChangedThenAddedThenAbsent() = inTemp { d ->
+        val o = write(d, "o.834", f834(listOf(member("SUBA", "MA"), member("SUBB", "MB"), member("SUBC", "MC"))))
+        val n = write(d, "n.834", f834(listOf(member("SUBA", "MA", extra = listOf("DTP*999*D8*20260101")), member("SUBC", "MC"), member("SUBN", "MN"))))
+        val types = ArrayList<String>()
+        Differ.diff(o, n, Profile.default()) { types.add(it.type) }
+        assertEquals(listOf("CHANGED", "ADDED", "TERMED"), types.distinct())
+    }
+
+    @Test
+    fun lc_resubmissionIsResolvedToTheMostRecentEarlier837() = inTemp { d ->
+        val orig = write(d, "a_orig.837", env(f837(listOf(Triple("ORIG1", "100", "20260105")), bht = "20260105"), isactl = "000000011", fid = "HC", gsdate = "20260105", gsver = "005010X222A1"))
+        val resub = write(d, "b_resub.837", env(f837(listOf(Triple("RESUB1", "100", "20260202")), bht = "20260202"), isactl = "000000012", fid = "HC", gsdate = "20260202", gsver = "005010X222A1"))
+        val ack = write(d, "x_ack.999", env(S("999", "0001", "005010X231A1", listOf("AK1*HC*1*005010X222A1", "AK2*837*0001*005010X222A1", "IK5*R*5")),
+            gsctl = "7", isactl = "000000013", fid = "FA", gsdate = "20260203"))
+        val csv = d.resolve("o.csv")
+        val s = recon(listOf(orig, resub, ack), csv = csv)
+        assertEquals(1L, s.counts["REJECTED"]); assertEquals(1L, s.counts["UNMATCHED"])
+        val text = Files.readString(csv)
+        assertTrue("REJECTED,RESUB1" in text && "UNMATCHED,ORIG1" in text, text)
+        assertTrue("most recent 837 sent before it" in text, text)
+    }
+
+    @Test
+    fun ld_ackWarningSaysWhichCheckFailed() = inTemp { d ->
+        val dateFail = recon(febOnly2(d, "20260110", "005010X222A1"))
+        assertTrue(dateFail.warnings.any { "date check failed for 1" in it && "version check" !in it }, dateFail.warnings.toString())
+        val verFail = recon(febOnly2(d, "20260210", "005010X999"))
+        assertTrue(verFail.warnings.any { "version check failed for 1" in it && "date check" !in it }, verFail.warnings.toString())
+    }
+
+    private fun febOnly2(d: Path, ackDate: String, ackVer: String): List<Path> {
+        val feb = write(d, "feb.837", env(f837(listOf(Triple("FEB1", "100", "20260205")), bht = "20260205"), isactl = "000000012", fid = "HC", gsdate = "20260205", gsver = "005010X222A1"))
+        val ack = write(d, "jan.999", env(S("999", "0001", "005010X231A1", listOf("AK1*HC*1*$ackVer", "AK2*837*0001*005010X222A1", "IK5*R*5")),
+            gsctl = "7", isactl = "000000013", fid = "FA", gsdate = ackDate))
+        return listOf(feb, ack)
+    }
+
+    @Test
+    fun le_pairingCutoffNoticeIsAWarning() {
+        val src = Files.readString(Path.of("src", "main", "kotlin", "tools", "datawharf", "x12diff", "Diff.kt"))
+        assertTrue("WARNING: more than 100,000 ADDED members" in src)
+        assertEquals("0.2.3", VERSION)
+    }
 }

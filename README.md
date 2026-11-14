@@ -12,7 +12,7 @@ A free command-line tool for healthcare X12 files, from Datawharf Tools.
 
 ## Quick start
 
-You need Java 17 or newer, or use the Windows app image (`x12diff.exe`, runtime bundled).
+You need Java 17 or newer (the jar is built for Java 17 and also runs on 21), or use the Windows app image (`x12diff.exe`, runtime bundled).
 
 ```
 java -jar x12diff.jar parse enrollment.834
@@ -45,6 +45,8 @@ CHANGED:    11
 UNCHANGED:  276
 CSV written: changes.csv
 ```
+
+The diff CSV lists the CHANGED rows and the TERMED rows caused by a termination flag first, in new-file order, then the ADDED rows, then the TERMED (or, in change mode, NOT_IN_NEW) rows for members that are absent from the new file.
 
 `changes.csv`:
 
@@ -133,11 +135,11 @@ How claims are classified:
 
 - A claim matches remit entries by CLM01 = CLP01. When the 837 input holds the same CLM01 more than once (resubmissions, corrected claims), x12diff warns and picks the claim by absolute charge, then the payer claim control number (CLP07), then by whether the claim already has a payment or a reversal waiting for repayment. A reversal therefore lands on the claim that holds its original payment, and a repayment on the same claim. If two duplicate claims have the same charge the match can still be wrong, and the warning says so. A paid amount above the 837 charge is flagged.
 - Amounts for one claim are summed across all remit entries, so an original payment, a reversal and a repayment net out. If any entry has a reversal status (profile `recon.reversal.codes`, default 22): REVERSED when the net paid is zero or less, ADJUSTED when money is still paid.
-- Otherwise, with zero paid: PATIENT_RESP only when there is patient responsibility and nothing else was adjusted (for example the whole amount went to the deductible); that claim was processed, not denied. DENIED when an entry has a denial status (`recon.denied.codes`, default 4), when there is no patient responsibility, or when any non-PR adjustment such as CO-50 reduced the payment, even if some of the amount also went to the patient.
+- Otherwise, with zero paid: PATIENT_RESP only when there is patient responsibility and nothing but PR and the `recon.contractual` codes was adjusted (for example the whole amount went to the deductible); that claim was processed, not denied. DENIED when an entry has a denial status (`recon.denied.codes`, default 4), when there is no patient responsibility, or when any non-PR adjustment such as CO-50 reduced the payment, even if some of the amount also went to the patient.
 - Otherwise, with money paid: PAID when the only adjustments are patient responsibility (PR) and the routine write-offs listed in `recon.contractual` (default `CO-45, CO-253`: contractual plus sequestration), PARTIAL when any other adjustment reduced the payment. A claim with no adjustment segments at all is PARTIAL if paid plus patient responsibility is below the charge. To extend the list, add `GROUP-REASON` codes to the profile line, for example `recon.contractual = CO-45, CO-253, CO-42, PI-45`. If PARTIAL looks too high for a payer, the reason codes in the `claim_adjustments` and `line_adjustments` columns of `remit` show which ones to add.
 - No remit yet: UNMATCHED, aged by days from the claim date to `--asof` (default today). A claim date after `--asof` goes in the `future` bucket. The claim date is the first match of each `recon.claim.date` locator in the claim (default `DTP*472:03`, then `DTP*434:03`; a date range uses its first date), else `recon.claim.date.fallback` (default `BHT:04`).
 - REJECTED before adjudication, only when no remit exists:
-  - a 999 or 997 rejected the claim's transaction set (IK5 or AK5 element 1 in `recon.ack.reject.codes`, default R, M, W, X; AK9 rejects a whole group). The 999 is tied to the 837 by GS06 and ST02, the version in AK1-03 against GS08, and the date: the 999's GS04 must be on or after the 837's GS04 and within `recon.ack.window.days` (default 30), otherwise nothing is marked and a warning says so. If several 837 sets still match, the sender and receiver in the GS segments and then the file name (`jan.837` with `jan.999`) decide; the row's `detail` says when the file name was used. If more than one candidate is left, nothing is marked and a warning says why. These checks make a wrong match unlikely but cannot rule it out when two sets share every identifier and date; keep one month per folder if in doubt;
+  - a 999 or 997 rejected the claim's transaction set (IK5 or AK5 element 1 in `recon.ack.reject.codes`, default R, M, W, X; AK9 rejects a whole group). The 999 is tied to the 837 by GS06 and ST02, the version in AK1-03 against GS08, and the date: the 999's GS04 must be on or after the 837's GS04 and within `recon.ack.window.days` (default 30), otherwise nothing is marked and a warning says so. If several 837 sets still match, the sender and receiver in the GS segments, then the file name (`jan.837` with `jan.999`), then the most recent 837 sent before the acknowledgement decide, so a resubmission that reused the same control numbers is resolved to the newer set; the row's `detail` says when the file name was used. If more than one candidate is left, nothing is marked and a warning says why, naming whether the date check or the version check failed. These checks make a wrong match unlikely but cannot rule it out when two sets share every identifier and date; keep one month per folder if in doubt;
   - or a 277CA claim-level status has a category in `recon.status.reject.categories` (default A3, A4, A6, A7, A8; claims are tied by the patient control number in TRN02, and by the charge in STC04 if the ID is duplicated; the 277CA's BHT04 (or GS04) must also be on or after the 837 date and within the same window). Service-line statuses are ignored. The newest status (by STC02 date) wins, and an acceptance (`recon.status.accept.categories`, default A0, A1, A2) clears an earlier rejection. On the same date an acceptance wins.
 - ORPHAN: an 835 entry with no matching 837 claim.
 

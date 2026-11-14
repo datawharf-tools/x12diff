@@ -1,4 +1,4 @@
-# x12diff 0.2.2 build report (0.1.0, 0.2.0 and 0.2.1 sections kept below)
+# x12diff 0.2.3 build report (earlier sections kept below)
 
 Built 2026-11-14 on Windows 11, Temurin JDK 21.0.11, Gradle 9.4.1, Kotlin 2.2.21. Runtime dependencies: none (Kotlin stdlib only).
 
@@ -125,3 +125,25 @@ Known limits now: the synthetic reversal checks can net negative; PAID/PARTIAL d
 The reviewer's note on the global git identity: `~/.gitconfig` is not touched by this project; the repo-local identity is Datawharf Tools.
 
 Smoke on the 316 MB synthetic claims set and the 299 MB 834 pair, `-Xmx512m`: recon 7.1 s, 631 MB peak working set, counts equal the generator's; 834 diff 7.9 s, 591 MB. Packaging: the jar and `build/jpackage/x12diff/x12diff.exe` (reports 0.2.2) were rebuilt.
+
+## 0.2.3: fixes from REVIEW_3.md
+
+68 unit tests, all passing (62 earlier + 6 new).
+
+| Finding | Status | Fix |
+|---|---|---|
+| V1 HIGH, jar needed Java 21 | Fixed | Toolchain and `jvmTarget` are now 17; class files are version 61 (a test checks it). `java -jar x12diff.jar --version` prints 0.2.3 under Temurin 17.0.20 and under 21.0.11, and recon and diff runs give identical counts on both. The app image still builds (it bundles the runtime of the JDK that runs jpackage, 21) |
+| L-a README PATIENT_RESP wording | Fixed | "nothing but PR and the `recon.contractual` codes was adjusted" |
+| L-b diff CSV row order | Documented | CHANGED and flagged-TERMED rows, then ADDED, then absent TERMED/NOT_IN_NEW |
+| L-c several 837 sets in the window | Fixed | The acknowledgement is matched to the most recent 837 sent before it when that is unique, and the row detail says so; if dates tie, nothing is marked and a warning is printed |
+| L-d which check failed | Fixed | The 999 warning says whether the date check, the version check, or both failed, and for how many sets |
+| L-e pairing cutoff notice | Fixed | Now printed as a WARNING (stdout and stderr) |
+
+Smoke, `-Xmx512m`, synthetic data (1,050,000 claims, 316 MB set; 1,150,000-member 834 pair of 299 MB):
+
+| Case | Java 21 | Java 17 |
+|---|---|---|
+| recon | 6.7 s, 624 MB peak working set | 6.0 s, 616 MB |
+| 834 diff | 7.3 s, 589 MB | 8.2 s, 603 MB |
+
+Counts equal the generator's on both. The launch copy's "about 8 seconds" (diff) and "about 7 seconds" (recon) still hold.

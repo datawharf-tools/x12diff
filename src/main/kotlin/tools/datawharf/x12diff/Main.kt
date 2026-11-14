@@ -6,7 +6,7 @@ import java.nio.file.Files
 import java.nio.file.NoSuchFileException
 import kotlin.system.exitProcess
 
-const val VERSION = "0.2.2"
+const val VERSION = "0.2.3"
 
 private val USAGE = """
 x12diff $VERSION - offline X12 inspector, 834 member diff, 835 remit and claim reconciliation (Datawharf Tools)

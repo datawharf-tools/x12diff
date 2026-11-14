@@ -261,19 +261,30 @@ object ReconCmd {
                 }
                 // The acknowledgement must be dated on or after the 837 and within the window, and name the same version.
                 val ackDays = Dates.days(ackDate)
-                val timely = cands.filter { sr ->
-                    val okDate = ackDays == null || sr.gsDate == null || (ackDays - sr.gsDate in 0..windowDays)
-                    val okVer = ackVer.isEmpty() || sr.gs08.isEmpty() || ackVer == sr.gs08
-                    okDate && okVer
-                }
+                fun dateOk(sr: SetRef) = ackDays == null || sr.gsDate == null || (ackDays - sr.gsDate in 0..windowDays)
+                fun verOk(sr: SetRef) = ackVer.isEmpty() || sr.gs08.isEmpty() || ackVer == sr.gs08
+                val timely = cands.filter { dateOk(it) && verOk(it) }
                 if (timely.isEmpty()) {
                     sum.ambiguousTies++
-                    addWarn("$fname: $what matches ${cands.size} 837 set(s), but the acknowledgement date $ackDate is not on or after the 837 date and within ${windowDays} days (or the version differs); nothing was marked. " +
-                        "If the 999 really belongs to this 837, raise recon.ack.window.days in the profile")
+                    val dateBad = cands.count { !dateOk(it) }
+                    val verBad = cands.count { !verOk(it) }
+                    val why = listOf(
+                        if (dateBad > 0) "the date check failed for $dateBad (acknowledgement dated $ackDate must be on or after the 837 and within $windowDays days)" else "",
+                        if (verBad > 0) "the version check failed for $verBad (AK1-03 '$ackVer' differs from the 837's GS08)" else "",
+                    ).filter { it.isNotEmpty() }.joinToString("; ")
+                    addWarn("$fname: $what matches ${cands.size} 837 set(s), but $why; nothing was marked. " +
+                        "If the 999 really belongs to this 837, check the dates or raise recon.ack.window.days in the profile")
                     return
                 }
                 val usedStem = BooleanArray(1)
-                val c = narrow(timely, gs02, gs03, fileStem, usedStem)
+                var c = narrow(timely, gs02, gs03, fileStem, usedStem)
+                // Several 837 sets still match: the acknowledgement answers the most recent one sent before it.
+                var usedLatest = false
+                if (c.map { it.group }.distinct().size > 1 && ackDays != null && c.all { it.gsDate != null }) {
+                    val best = c.maxOf { it.gsDate!! }
+                    val top = c.filter { it.gsDate == best }
+                    if (top.map { it.group }.distinct().size == 1) { c = top; usedLatest = true }
+                }
                 if (c.map { it.group }.distinct().size > 1) {
                     sum.ambiguousTies++
                     addWarn("$fname: $what matches ${c.map { it.group }.distinct().size} different 837 groups (same GS06/ST02 in several files); no claim was marked rejected. " +
@@ -282,6 +293,7 @@ object ReconCmd {
                 }
                 if (wholeGroup) c.forEach { markSet(it) } else markSet(c.first())
                 if (usedStem[0]) c.forEach { setNotes[it.id] = "999 matched to this 837 by file name" }
+                if (usedLatest) c.forEach { setNotes[it.id] = "999 matched to the most recent 837 sent before it (several sets share GS06/ST02)" }
             }
 
             override fun segment(s: Segment) {

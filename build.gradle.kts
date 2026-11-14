@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "tools.datawharf"
-version = "0.2.2"
+version = "0.2.3"
 
 repositories {
     mavenCentral()
@@ -19,8 +19,8 @@ dependencies {
 }
 
 kotlin {
-    jvmToolchain(21)
-    compilerOptions { jvmTarget = JvmTarget.JVM_21 }
+    jvmToolchain(17)
+    compilerOptions { jvmTarget = JvmTarget.JVM_17 }
 }
 
 application {

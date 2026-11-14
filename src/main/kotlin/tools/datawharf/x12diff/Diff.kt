@@ -291,7 +291,7 @@ object Differ {
                     "the rows say 'possible name change'. Check them before acting on the terminations.")
             }
         } else if (bufFull) {
-            sum.notes.add("Note: more than 100,000 ADDED members; possible name changes were not paired.")
+            sum.notes.add("WARNING: more than 100,000 ADDED members; possible name changes were not paired, so check ADDED/TERMED pairs yourself.")
         }
         addedBuf.forEach(sink)
         goneRows.forEach(sink)
