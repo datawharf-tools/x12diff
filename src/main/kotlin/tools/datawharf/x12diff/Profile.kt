@@ -41,7 +41,16 @@ class Profile(
     val align: Map<String, Int>,
     val ignore: List<Locator>,
     val labels: Map<String, String>,
+    val raw: Map<String, String> = emptyMap(),
 ) {
+    fun list(name: String, default: List<String>): List<String> =
+        if (raw.containsKey(name)) raw[name]!!.split(',').map { it.trim() }.filter { it.isNotEmpty() } else default
+
+    fun value(name: String, default: String): String = raw[name]?.takeIf { it.isNotEmpty() } ?: default
+
+    /** Label for an adjustment, keyed like CO-45 (group-reason); empty when the user supplied none. */
+    fun adjLabel(group: String, reason: String): String = raw["adjlabel.$group-$reason"] ?: ""
+
     private val hasIgnore = ignore.isNotEmpty()
 
     fun segmentIgnored(s: Segment): Boolean = hasIgnore && ignore.any { it.pos == 0 && it.matches(s) }
@@ -152,6 +161,21 @@ label.NM1*IL:09 = member id
 label.DTP*348:03 = start date
 label.DTP*349:03 = end date
 label.HD:03 = line code
+
+# ---- remit / recon (values are codes only; descriptions are yours to add) ----
+# Claim status values (CLP02 in an 835) that mark a reversal.
+recon.reversal.codes = 22
+# A remit counts as PAID when paid >= charge * ratio, otherwise PARTIAL. Lower it (e.g. 0.8) for contracted rates.
+recon.paid.min.ratio = 1.0
+# Claim date in the 837 (first match inside the claim), then a fallback seen before the first claim of the set.
+recon.claim.date = DTP*472:03
+recon.claim.date.fallback = BHT:04
+# Acknowledgement status values (IK5/AK5 element 1, AK9 element 1) that count as rejected.
+recon.ack.reject.codes = R
+# Claim-status category values (first part of STC01 in a 277CA) that count as rejected.
+recon.status.reject.categories = A3, A4, A6, A7, A8
+# Optional labels for the adjustment rollup, written as adjlabel.GROUP-REASON
+# adjlabel.CO-45 = your label here
 """
 
         fun default(): Profile = parse(DEFAULT_TEXT, "built-in default")
@@ -200,7 +224,7 @@ label.HD:03 = line code
             }
             val start = map["member.start"]?.trim().orEmpty().ifEmpty { "INS" }
             if (start.length > 3) throw X12Exception("Profile $source: bad member.start '$start'")
-            return Profile(start, keyParts, list(map["term.codes"]).toSet(), termCode, termDates, align, ignore, labels)
+            return Profile(start, keyParts, list(map["term.codes"]).toSet(), termCode, termDates, align, ignore, labels, map)
         }
     }
 }

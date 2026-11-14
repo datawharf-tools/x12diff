@@ -12,7 +12,7 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import kotlin.system.exitProcess
 
-const val VERSION = "0.1.0"
+const val VERSION = "0.2.0"
 
 private val USAGE = """
 x12diff $VERSION - offline X12 inspector and 834 member diff (Datawharf Tools)
@@ -20,7 +20,10 @@ x12diff $VERSION - offline X12 inspector and 834 member diff (Datawharf Tools)
 Usage:
   x12diff parse FILE
   x12diff diff OLD NEW [--csv out.csv] [--profile p.properties] [--show N] [--stats]
+  x12diff remit FILE_OR_DIR... [--csv lines.csv] [--rollup adjustments.csv] [--profile p.properties] [--show N]
+  x12diff recon FILE_OR_DIR... [--csv claims.csv] [--profile p.properties] [--asof YYYYMMDD] [--show N] [--stats]
   x12diff gen --members N --old OLD --new NEW [--seed S] [--newlines] [--sets K]
+  x12diff gen --kind claims --claims N --dir DIR [--seed S] [--newlines] [--set-size K]
   x12diff profile            print the built-in profile (redirect to a file to customise)
   x12diff --version | --help
 
@@ -28,7 +31,7 @@ Exit codes: 0 ok (diff: no differences), 1 diff found differences, 2 error.
 Runs entirely on your machine; makes no network connections.
 """.trimIndent()
 
-private fun fmt(n: Long) = String.format("%,d", n)
+internal fun fmt(n: Long) = String.format("%,d", n)
 
 private fun show(c: Char): String = when (c) {
     '\n' -> "\\n (LF)"
@@ -51,6 +54,8 @@ fun run(args: Array<String>, out: PrintStream, err: PrintStream): Int {
             "--version" -> { out.println("x12diff $VERSION"); 0 }
             "parse" -> cmdParse(args.drop(1), out)
             "diff" -> cmdDiff(args.drop(1), out)
+            "remit" -> cmdRemit(args.drop(1), out)
+            "recon" -> cmdRecon(args.drop(1), out)
             "gen" -> cmdGen(args.drop(1), out)
             "profile" -> { out.print(Profile.DEFAULT_TEXT); 0 }
             else -> throw X12Exception("Unknown command '${args[0]}'. Run 'x12diff --help'.")
@@ -106,9 +111,6 @@ private fun cmdParse(a: List<String>, out: PrintStream): Int {
     return 0
 }
 
-private fun csv(s: String): String =
-    if (s.any { it == ',' || it == '"' || it == '\n' || it == '\r' }) "\"" + s.replace("\"", "\"\"") + "\"" else s
-
 private fun cmdDiff(a: List<String>, out: PrintStream): Int {
     val pos = ArrayList<String>()
     var csvPath: String? = null
@@ -151,8 +153,7 @@ private fun cmdDiff(a: List<String>, out: PrintStream): Int {
         val sum = Differ.diff(oldP, newP, profile) { r ->
             w?.let {
                 it.write(
-                    listOf(r.type, r.key, r.segment, r.element, r.label, r.oldValue, r.newValue, r.detail)
-                        .joinToString(",") { c -> csv(c) } + "\r\n"
+                    Csv.line(listOf(r.type, r.key, r.segment, r.element, r.label, r.oldValue, r.newValue, r.detail))
                 )
             }
             if (shown < showN) {
@@ -191,6 +192,10 @@ private fun cmdGen(a: List<String>, out: PrintStream): Int {
     var seed = 1L
     var lines = false
     var sets = 1
+    var kind = "834"
+    var claimsN = 0L
+    var dirP: String? = null
+    var setSize = 40
     var i = 0
     while (i < a.size) {
         val x = a[i]
@@ -205,10 +210,23 @@ private fun cmdGen(a: List<String>, out: PrintStream): Int {
             "--seed" -> seed = value().toLongOrNull() ?: throw X12Exception("--seed needs a number")
             "--sets" -> sets = value().toIntOrNull() ?: throw X12Exception("--sets needs a number")
             "--newlines" -> lines = true
+            "--kind" -> kind = value()
+            "--claims" -> claimsN = value().toLongOrNull() ?: throw X12Exception("--claims needs a number")
+            "--dir" -> dirP = value()
+            "--set-size" -> setSize = value().toIntOrNull() ?: throw X12Exception("--set-size needs a number")
             else -> throw X12Exception("Unknown option '$x'")
         }
         i++
     }
+    if (kind == "claims") {
+        if (claimsN < 1 || dirP == null) throw X12Exception("Usage: x12diff gen --kind claims --claims N --dir DIR [--seed S] [--newlines] [--set-size K]")
+        val r = GenClaims.generate(claimsN, Paths.get(dirP), seed, lines, setSize)
+        out.println("Wrote synthetic claims.837, remits_1.835, remits_2.835, ack.999, status.277 to $dirP (fake data only)")
+        out.println("Expected recon: PAID ${fmt(r.paid)}, PARTIAL ${fmt(r.partial)}, DENIED ${fmt(r.denied)}, REVERSED ${fmt(r.reversed)}, ADJUSTED ${fmt(r.adjusted)}, UNMATCHED ${fmt(r.unmatched)}, REJECTED ${fmt(r.rejected)} (${fmt(r.rejectedBySet)} by 999, ${fmt(r.rejectedBy277)} by 277CA), ORPHAN ${fmt(r.orphans)}")
+        out.println("Expected remit: ${fmt(r.remitEntries)} claim entries on ${fmt(r.remitChecks)} checks")
+        return 0
+    }
+    if (kind != "834") throw X12Exception("--kind must be 834 or claims")
     if (members < 1 || oldP == null || newP == null) throw X12Exception("Usage: x12diff gen --members N --old OLD --new NEW [--seed S] [--newlines] [--sets K]")
     val r = Gen.generate(members, Paths.get(oldP), Paths.get(newP), seed, lines, sets)
     out.println("Wrote synthetic files (fake data only):")
