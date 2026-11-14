@@ -1,13 +1,17 @@
 package tools.datawharf.x12diff
 
 import java.io.BufferedWriter
-import java.nio.charset.StandardCharsets
-import java.nio.file.Files
 import java.nio.file.Path
 import java.util.BitSet
 import java.util.TreeMap
 
-private class ReconClaim(val id: String, val charge: Long, val date: Int, val setId: Int) {
+private class SetRef(
+    val id: Int, val fileIdx: Int, val isa13: String, val gs02: String, val gs03: String, val gs06: String, val st02: String,
+) {
+    val group: String get() = "$fileIdx|$isa13|$gs06"
+}
+
+private class ReconClaim(val id: String, val charge: Long, val date: Int, val setId: Int, val fileIdx: Int) {
     var next: ReconClaim? = null
     var remitEntries = 0
     var paid = 0L
@@ -15,7 +19,13 @@ private class ReconClaim(val id: String, val charge: Long, val date: Int, val se
     var remitCharge = 0L
     var reversal = false
     var chargeMismatch = false
+    var deniedStatus = false
+    var anyAdj = false
+    var otherAdj = 0L
+    var ctl: String? = null
     var reject277: String? = null
+    var s277Date = Int.MIN_VALUE
+    var dup = false
 }
 
 private class Orphan(val id: String, val charge: Long, val paid: Long, val patientResp: Long, val status: String, val where: String)
@@ -31,10 +41,14 @@ class ReconSummary {
     var statusEntries277 = 0L
     var chargedTotal = 0L
     var paidTotal = 0L
+    var duplicateClaimIds = 0L
+    var ambiguousTies = 0L
     var warningCount = 0L
     val warnings = ArrayList<String>()
+    val envelope = EnvelopeLog()
+    val skipped = ArrayList<String>()
     /** bucket label -> count, for UNMATCHED claims */
-    val aging = java.util.LinkedHashMap<String, Long>().apply { for (b in listOf("0-30", "31-60", "61-90", "91+", "unknown")) put(b, 0L) }
+    val aging = java.util.LinkedHashMap<String, Long>().apply { for (b in listOf("0-30", "31-60", "61-90", "91+", "future", "unknown")) put(b, 0L) }
     val firstRows = ArrayList<List<String>>()
 }
 
@@ -44,55 +58,73 @@ object ReconCmd {
         "claim_date", "age_days", "reject_source", "detail",
     )
 
+    private fun stem(p: Path): String = p.fileName.toString().substringBeforeLast('.').lowercase()
+
     fun run(files: List<Path>, profile: Profile, csvPath: String?, asOf: String, show: Int): ReconSummary {
         val sum = ReconSummary()
         val asOfDays = Dates.days(asOf) ?: throw X12Exception("--asof needs a date like 20260131")
         fun addWarn(m: String) { sum.warningCount++; if (sum.warnings.size < 200) sum.warnings.add(m) }
 
         val reversal = profile.list("recon.reversal.codes", listOf("22")).toSet()
-        val minRatio = profile.value("recon.paid.min.ratio", "1.0").toDoubleOrNull()
-            ?: throw X12Exception("Profile: recon.paid.min.ratio must be a number")
-        val dateLoc = Locator.parse(profile.value("recon.claim.date", "DTP*472:03"), "recon.claim.date")
-        val dateFallback = profile.value("recon.claim.date.fallback", "BHT:04").let { Locator.parse(it, "recon.claim.date.fallback") }
-        val ackReject = profile.list("recon.ack.reject.codes", listOf("R")).toSet()
+        val deniedCodes = profile.list("recon.denied.codes", listOf("4")).toSet()
+        val contractual = profile.list("recon.contractual", listOf("CO-45")).toSet()
+        val dateLocs = profile.list("recon.claim.date", listOf("DTP*472:03", "DTP*434:03")).map { Locator.parse(it, "recon.claim.date") }
+        val dateFallback = Locator.parse(profile.value("recon.claim.date.fallback", "BHT:04"), "recon.claim.date.fallback")
+        val ackReject = profile.list("recon.ack.reject.codes", listOf("R", "M", "W", "X")).toSet()
         val statusReject = profile.list("recon.status.reject.categories", listOf("A3", "A4", "A6", "A7", "A8")).toSet()
+        val statusAccept = profile.list("recon.status.accept.categories", listOf("A0", "A1", "A2")).toSet()
+        val stems = files.map { stem(it) }
 
         val all = ArrayList<ReconClaim>()
         val byId = HashMap<String, ReconClaim>(1 shl 16)
-        val setKeys = HashMap<String, Int>()          // "gs|st" -> set id
-        val setsByGs = HashMap<String, ArrayList<Int>>()
-        val setsBySt = HashMap<String, ArrayList<Int>>()
-        var nextSet = 0
+        val sets = ArrayList<SetRef>()
+        val byGsSt = HashMap<String, ArrayList<SetRef>>()
+        val byGs = HashMap<String, ArrayList<SetRef>>()
         val rejected = BitSet()
         val orphans = ArrayList<Orphan>()
 
+        fun chain(h: ReconClaim): List<ReconClaim> { val l = ArrayList<ReconClaim>(); var t: ReconClaim? = h; while (t != null) { l.add(t); t = t.next }; return l }
+
         // ---------- phase 1: 837 claims ----------
+        var fileIdx = 0
         val h837 = object : TxHandler {
             var setId = 0
             var cur: String? = null
             var charge = 0L
-            var date = ""
+            val dateVals = arrayOfNulls<String>(dateLocs.size)
             var fallbackDate = ""
-            var headerDone = false
 
             override fun begin(type: String, st: Segment, gs: Segment?, d: Delimiters, file: String) {
-                val gsCtl = gs?.el(6) ?: ""
-                setId = nextSet++
-                setKeys["$gsCtl|${st.el(2)}"] = setId
-                setsByGs.getOrPut(gsCtl) { ArrayList() }.add(setId)
-                setsBySt.getOrPut(st.el(2)) { ArrayList() }.add(setId)
+                setId = sets.size
+                val ref = SetRef(setId, fileIdx, isa13 = curIsa, gs02 = gs?.el(2) ?: "", gs03 = gs?.el(3) ?: "", gs06 = gs?.el(6) ?: "", st02 = st.el(2))
+                sets.add(ref)
+                byGsSt.getOrPut("${ref.gs06}|${ref.st02}") { ArrayList() }.add(ref)
+                byGs.getOrPut(ref.gs06) { ArrayList() }.add(ref)
                 sum.sets837++
                 cur = null
                 fallbackDate = ""
             }
 
+            var curIsa = ""
+
             private fun flush() {
                 val id = cur ?: return
                 cur = null
-                val dd = date.ifEmpty { fallbackDate }
-                val c = ReconClaim(id, charge, Dates.days(dd)?.toInt() ?: Int.MIN_VALUE, setId)
+                var dd = ""
+                for (v in dateVals) if (!v.isNullOrEmpty()) { dd = v; break }
+                if (dd.isEmpty()) dd = fallbackDate
+                val c = ReconClaim(id, charge, Dates.days(dd)?.toInt() ?: Int.MIN_VALUE, setId, fileIdx)
                 val head = byId[id]
-                if (head == null) byId[id] = c else { var t = head; while (t!!.next != null) t = t.next; t.next = c }
+                if (head == null) byId[id] = c else {
+                    sum.duplicateClaimIds++
+                    val l = chain(head)
+                    c.dup = true
+                    l.forEach { it.dup = true }
+                    addWarn("duplicate CLM01 '$id' in the 837 input (charges ${l.joinToString(" / ") { Money.fmt(it.charge) }} / ${Money.fmt(charge)}): " +
+                        "remit entries are matched by charge, payer control number and order; check these rows")
+                    if (l.any { it.charge == charge }) addWarn("duplicate CLM01 '$id' has two claims with the same charge ${Money.fmt(charge)}: the match may be wrong")
+                    l.last().next = c
+                }
                 all.add(c)
                 sum.chargedTotal += charge
             }
@@ -102,10 +134,11 @@ object ReconCmd {
                     flush()
                     cur = s.el(1)
                     charge = Money.parse(s.el(2)) ?: 0L
-                    date = ""
+                    java.util.Arrays.fill(dateVals, null)
                     if (cur!!.isEmpty()) { addWarn("837 claim with empty CLM01 at byte offset ${s.offset}"); cur = "(blank)" }
+                    if (Money.parse(s.el(2)) == null) addWarn("837 claim ${cur}: CLM02 '${s.el(2)}' is not a valid amount")
                 } else if (cur != null) {
-                    if (date.isEmpty() && dateLoc.matches(s)) date = dateLoc.value(s)
+                    for (i in dateLocs.indices) if (dateVals[i] == null && dateLocs[i].matches(s)) dateVals[i] = dateLocs[i].value(s)
                 } else if (fallbackDate.isEmpty() && dateFallback.matches(s)) {
                     fallbackDate = dateFallback.value(s)
                 }
@@ -113,19 +146,43 @@ object ReconCmd {
 
             override fun end(complete: Boolean) {
                 flush()
+                if (!complete) addWarn("an 837 transaction set in ${files[fileIdx].fileName} is cut off (no SE); its last claim may be incomplete")
             }
         }
-
-        for (f in files) TxWalker.walk(f, mapOf("837" to h837))
+        for ((i, f) in files.withIndex()) {
+            fileIdx = i
+            h837.curIsa = isa13Of(f)
+            val chk = EnvelopeChecker()
+            TxWalker.walk(f, mapOf("837" to h837), chk)
+            sum.envelope.add(f.fileName.toString(), chk)
+        }
         sum.claims = all.size.toLong()
 
         // ---------- phase 2: 835 / 999 / 997 / 277 ----------
-        fun pick(id: String, charge: Long): ReconClaim? {
-            var c = byId[id] ?: return null
-            if (c.next == null) return c
-            var t: ReconClaim? = c
-            while (t != null) { if (t.charge == charge) return t; t = t.next }
-            return c
+        fun pick(c: RemitClaim): ReconClaim? {
+            val head = byId[c.id] ?: return null
+            if (head.next == null) return head
+            val list = chain(head)
+            val isRev = c.status in reversal || c.charge < 0
+            val abs = Math.abs(c.charge)
+            var cand = list.filter { it.charge == abs }
+            if (cand.isEmpty()) cand = list
+            if (cand.size > 1 && c.payerCtl.isNotEmpty()) {
+                val b = cand.filter { it.ctl == c.payerCtl }
+                if (b.isNotEmpty()) cand = b
+            }
+            if (cand.size > 1) {
+                val pref = if (isRev) cand.filter { it.paid > 0 }
+                else cand.filter { it.reversal && it.paid <= 0 }.ifEmpty { cand.filter { it.remitEntries == 0 } }
+                if (pref.isNotEmpty()) cand = pref
+            }
+            if (cand.size > 1) {
+                sum.ambiguousTies++
+                addWarn("remit entry for duplicated CLM01 '${c.id}' (${c.check.label}) could not be matched to one claim; applied to the first candidate")
+            }
+            val chosen = cand[0]
+            if (c.payerCtl.isNotEmpty() && chosen.ctl == null) chosen.ctl = c.payerCtl
+            return chosen
         }
 
         val remitListener = object : RemitListener {
@@ -133,39 +190,82 @@ object ReconCmd {
             override fun check(c: CheckInfo) { sum.remitChecks++ }
             override fun claim(c: RemitClaim) {
                 sum.remitEntries++
-                val cl = pick(c.id, c.charge)
+                val cl = pick(c)
                 if (cl == null) {
                     orphans.add(Orphan(c.id, c.charge, c.paid, c.patientResp, c.status, c.check.label))
                     return
                 }
                 cl.remitEntries++
-                cl.paid += c.paid
-                cl.patientResp += c.patientResp
+                if (c.paidOk) cl.paid += c.paid
+                if (c.prOk) cl.patientResp += c.patientResp
+                if (c.status in deniedCodes) cl.deniedStatus = true
+                for (a in c.allAdjs()) {
+                    cl.anyAdj = true
+                    if (a.group != "PR" && a.key !in contractual) cl.otherAdj += a.amount
+                }
                 if (c.status in reversal) cl.reversal = true
                 else {
                     cl.remitCharge = c.charge
-                    if (c.charge != cl.charge) cl.chargeMismatch = true
+                    if (c.chargeOk && c.charge != cl.charge) cl.chargeMismatch = true
                 }
             }
+        }
+
+        fun markSet(s: SetRef) { rejected.set(s.id) }
+
+        /** Narrows candidate sets by the (mirrored or same) sender/receiver pair, then by file name. */
+        fun narrow(cands: List<SetRef>, gs02: String, gs03: String, fileStem: String): List<SetRef> {
+            var c = cands
+            if (c.map { it.group }.distinct().size > 1) {
+                val m = c.filter { (it.gs02 == gs03 && it.gs03 == gs02) || (it.gs02 == gs02 && it.gs03 == gs03) }
+                if (m.isNotEmpty() && m.size < c.size) c = m
+            }
+            if (c.map { it.group }.distinct().size > 1) {
+                val f = c.filter { stems[it.fileIdx] == fileStem }
+                if (f.isNotEmpty() && f.size < c.size) c = f
+            }
+            return c
         }
 
         val h835 = RemitHandler(remitListener)
         val hAck = object : TxHandler {
             var gs = ""
             var st = ""
-            override fun begin(type: String, st: Segment, gs: Segment?, d: Delimiters, file: String) { this.gs = ""; this.st = ""; sum.ackSets++ }
+            var gs02 = ""
+            var gs03 = ""
+            var fileStem = ""
+            var fname = ""
 
-            private fun markSets(ids: List<Int>?) { ids?.forEach { rejected.set(it) } }
+            override fun begin(type: String, st: Segment, gs: Segment?, d: Delimiters, file: String) {
+                this.gs = ""; this.st = ""; sum.ackSets++
+                gs02 = gs?.el(2) ?: ""; gs03 = gs?.el(3) ?: ""; fname = file
+                fileStem = file.substringBeforeLast('.').lowercase()
+            }
+
+            private fun reject(cands: List<SetRef>, what: String, wholeGroup: Boolean) {
+                if (cands.isEmpty()) {
+                    addWarn("$fname: $what refers to an 837 set that is not in the input files; nothing was marked")
+                    return
+                }
+                val c = narrow(cands, gs02, gs03, fileStem)
+                if (c.map { it.group }.distinct().size > 1) {
+                    sum.ambiguousTies++
+                    addWarn("$fname: $what matches ${c.map { it.group }.distinct().size} different 837 groups (same GS06/ST02 in several files); no claim was marked rejected. " +
+                        "Name the 999 like its 837 (for example jan.837 and jan.999) or keep one month per folder")
+                    return
+                }
+                if (wholeGroup) c.forEach { markSet(it) } else markSet(c.first())
+            }
 
             override fun segment(s: Segment) {
                 when (s.id) {
                     "AK1" -> gs = s.el(2)
                     "AK2" -> st = s.el(2)
                     "IK5", "AK5" -> if (s.el(1) in ackReject) {
-                        val id = setKeys["$gs|$st"]
-                        if (id != null) rejected.set(id) else if (gs.isEmpty()) markSets(setsBySt[st])
+                        val c = if (gs.isEmpty()) sets.filter { it.st02 == st } else byGsSt["$gs|$st"] ?: emptyList()
+                        reject(c, "rejection for GS06=$gs ST02=$st", false)
                     }
-                    "AK9" -> if (s.el(1) in ackReject) markSets(setsByGs[gs])
+                    "AK9" -> if (s.el(1) in ackReject) reject(byGs[gs] ?: emptyList(), "group rejection for GS06=$gs", true)
                 }
             }
 
@@ -174,25 +274,55 @@ object ReconCmd {
         val h277 = object : TxHandler {
             var d = Delimiters('*', ':', null, '~')
             var claimId = ""
-            override fun begin(type: String, st: Segment, gs: Segment?, d: Delimiters, file: String) { this.d = d; claimId = "" }
+            var inLine = false
+            var fname = ""
+            var fileStem = ""
+
+            override fun begin(type: String, st: Segment, gs: Segment?, d: Delimiters, file: String) {
+                this.d = d; claimId = ""; inLine = false; fname = file; fileStem = file.substringBeforeLast('.').lowercase()
+            }
+
             override fun segment(s: Segment) {
                 when (s.id) {
-                    "HL" -> claimId = ""
-                    "TRN" -> if (s.el(1) == "2") claimId = s.el(2)
-                    "STC" -> if (claimId.isNotEmpty()) {
+                    "HL" -> { claimId = ""; inLine = false }
+                    "TRN" -> { inLine = false; if (s.el(1) == "2") claimId = s.el(2) }
+                    "SVC" -> inLine = true
+                    "STC" -> if (claimId.isNotEmpty() && !inLine) {
                         sum.statusEntries277++
+                        val head = byId[claimId]
+                        if (head == null) { addWarn("$fname: 277CA status for claim '$claimId' which is not in the 837 input"); return }
+                        var cands = chain(head)
+                        if (cands.size > 1) {
+                            val amt = Money.parse(s.el(4))
+                            if (amt != null) { val m = cands.filter { it.charge == amt }; if (m.isNotEmpty()) cands = m }
+                        }
+                        if (cands.size > 1) {
+                            val f = cands.filter { stems[it.fileIdx] == fileStem }
+                            if (f.isNotEmpty()) cands = f
+                        }
+                        if (cands.size > 1) {
+                            sum.ambiguousTies++
+                            addWarn("$fname: 277CA status for duplicated CLM01 '$claimId' matches ${cands.size} claims; none was marked")
+                            return
+                        }
+                        val cl = cands[0]
                         val cat = s.el(1).substringBefore(d.sub)
+                        val date = Dates.days(s.el(2))?.toInt() ?: Int.MIN_VALUE + 1
+                        // The newest status wins. On the same date an acceptance wins over a rejection.
                         if (cat in statusReject) {
-                            var t = byId[claimId]
-                            while (t != null) { t.reject277 = cat; t = t.next }
+                            if (date > cl.s277Date) { cl.reject277 = cat; cl.s277Date = date }
+                        } else if (cat in statusAccept) {
+                            if (date >= cl.s277Date) { cl.reject277 = null; cl.s277Date = date }
                         }
                     }
                 }
             }
+
             override fun end(complete: Boolean) {}
         }
         val handlers = mapOf("835" to h835, "999" to hAck, "997" to hAck, "277" to h277)
-        for (f in files) {
+        for ((i, f) in files.withIndex()) {
+            fileIdx = i
             val seen = TxWalker.walk(f, handlers)
             val known = (seen["837"] ?: 0) + (seen["835"] ?: 0) + (seen["999"] ?: 0) + (seen["997"] ?: 0) + (seen["277"] ?: 0)
             if (known == 0) addWarn("${f.fileName}: no 837, 835, 999 or 277 transaction set found (skipped)")
@@ -203,7 +333,7 @@ object ReconCmd {
         var w: BufferedWriter? = null
         try {
             if (csvPath != null) {
-                w = Files.newBufferedWriter(Path.of(csvPath), StandardCharsets.UTF_8)
+                w = Csv.open(csvPath)
                 w.write(Csv.line(HEADER))
             }
             fun emit(row: List<String>, status: String) {
@@ -215,32 +345,34 @@ object ReconCmd {
                 val ackRej = rejected.get(c.setId)
                 val status: String
                 var source = ""
-                var detail = ""
+                val notes = ArrayList<String>()
+                if (c.dup) notes.add("duplicate CLM01")
                 if (c.remitEntries == 0) {
                     status = if (ackRej || c.reject277 != null) "REJECTED" else "UNMATCHED"
                     if (ackRej) source = "999 set rejected"
                     if (c.reject277 != null) source = (if (source.isEmpty()) "" else "$source; ") + "277CA category ${c.reject277}"
                 } else {
-                    val ratioOk = c.paid.toDouble() >= c.charge.toDouble() * minRatio - 0.5
                     status = when {
                         c.reversal -> if (c.paid > 0) "ADJUSTED" else "REVERSED"
                         c.paid < 0 -> "REVERSED"
-                        c.paid == 0L -> "DENIED"
-                        ratioOk -> "PAID"
-                        else -> "PARTIAL"
+                        c.paid == 0L -> if (c.deniedStatus || c.patientResp <= 0L) "DENIED" else "PATIENT_RESP"
+                        c.otherAdj != 0L -> "PARTIAL"
+                        !c.anyAdj && c.paid + c.patientResp < c.charge -> "PARTIAL"
+                        else -> "PAID"
                     }
-                    if (c.chargeMismatch) detail = "charge differs between 837 (${Money.fmt(c.charge)}) and 835 (${Money.fmt(c.remitCharge)})"
-                    if (ackRej) detail = (if (detail.isEmpty()) "" else "$detail; ") + "999 rejected the set but a remit exists"
+                    if (c.chargeMismatch) notes.add("charge differs between 837 (${Money.fmt(c.charge)}) and 835 (${Money.fmt(c.remitCharge)})")
+                    if (c.paid > c.charge) { notes.add("paid exceeds the 837 charge"); addWarn("claim '${c.id}': paid ${Money.fmt(c.paid)} exceeds the 837 charge ${Money.fmt(c.charge)}") }
+                    if (ackRej) notes.add("999 rejected the set but a remit exists")
                     sum.paidTotal += c.paid
                 }
                 var age = ""
                 if (status == "UNMATCHED" || status == "REJECTED") {
                     if (c.date == Int.MIN_VALUE) {
-                        sum.aging.merge("unknown", 1L, Long::plus)
+                        if (status == "UNMATCHED") sum.aging.merge("unknown", 1L, Long::plus)
                     } else {
                         val a = asOfDays - c.date
                         age = a.toString()
-                        val b = if (a <= 30) "0-30" else if (a <= 60) "31-60" else if (a <= 90) "61-90" else "91+"
+                        val b = if (a < 0) "future" else if (a <= 30) "0-30" else if (a <= 60) "31-60" else if (a <= 90) "61-90" else "91+"
                         if (status == "UNMATCHED") sum.aging.merge(b, 1L, Long::plus)
                     }
                 }
@@ -248,10 +380,10 @@ object ReconCmd {
                 emit(
                     listOf(
                         status, c.id, Money.fmt(c.charge),
-                        if (c.remitEntries > 0 && !c.reversal) Money.fmt(c.remitCharge) else "",
+                        if (c.remitEntries > 0 && c.remitCharge != 0L) Money.fmt(c.remitCharge) else "",
                         if (c.remitEntries > 0) Money.fmt(c.paid) else "",
                         if (c.remitEntries > 0) Money.fmt(c.patientResp) else "",
-                        dateText, age, source, detail,
+                        dateText, age, source, notes.joinToString("; "),
                     ),
                     status,
                 )
@@ -265,4 +397,9 @@ object ReconCmd {
         }
         return sum
     }
+
+    /** ISA13 of the first interchange in a file (blank if unreadable). */
+    private fun isa13Of(p: Path): String = try {
+        java.nio.file.Files.newInputStream(p).use { ins -> X12Reader(ins).next()?.takeIf { it.id == "ISA" }?.el(13) ?: "" }
+    } catch (e: Exception) { "" }
 }

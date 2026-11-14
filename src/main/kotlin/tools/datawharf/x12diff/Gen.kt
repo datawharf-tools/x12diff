@@ -53,7 +53,7 @@ object Gen {
         o.seg("REF*1L*GRPTEST01")
         o.seg("DTP*356*D8*20260101")
         o.seg("NM1*IL*1*TESTPERSON" + n.toString().padStart(7, '0') + "*TESTFIRST*A***MI*$id9")
-        o.seg("PER*IP**HP*787555" + (n % 10000).toString().padStart(4, '0'))
+        o.seg("PER*IP**HP*80055501" + (n % 100).toString().padStart(2, '0'))
         val street = if (variant == 4) "200 SAMPLE AVENUE APT ${n % 97}" else "100 TEST STREET UNIT ${n % 97}"
         o.seg("N3*$street")
         o.seg("N4*TESTVILLE*TS*00000")
@@ -91,7 +91,7 @@ object Gen {
                     setNo++
                     o.count = 0
                     o.seg("ST*834*" + setNo.toString().padStart(4, '0') + "*005010X220A1")
-                    o.seg("BGN*00*TESTFILE$setNo*20260101*1200****2")
+                    o.seg("BGN*00*TESTFILE$setNo*20260101*1200****4")
                     inSet = true
                 }
                 member(o, n, v)

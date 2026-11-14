@@ -138,7 +138,16 @@ class EnvelopeChecker(private val maxWarnings: Int = 500) {
     companion object {
         /** Transaction type label: ST01, with 277 refined by an implementation reference containing X214. */
         fun typeLabel(st01: String, st03: String, gs08: String): String {
+            val impl = st03.ifEmpty { gs08 }
             if (st01 == "277" && (st03.contains("X214") || gs08.contains("X214"))) return "277CA"
+            if (st01 == "837") {
+                return when {
+                    impl.contains("X222") -> "837P"
+                    impl.contains("X223") -> "837I"
+                    impl.contains("X224") -> "837D"
+                    else -> "837"
+                }
+            }
             return st01.ifEmpty { "(blank)" }
         }
     }

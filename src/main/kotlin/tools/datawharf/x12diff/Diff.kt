@@ -24,75 +24,118 @@ class DiffSummary {
     var termedFlagged = 0L
     var changed = 0L
     var unchanged = 0L
+    /** Members absent from the new file in change mode (not counted as terminated). */
+    var absentNotTermed = 0L
     var duplicateKeys = 0L
     var emptyKeys = 0L
+    /** Members whose rows are marked "ambiguous key". */
+    var ambiguousMembers = 0L
+    var mode = "full"
+    var oldKind = ""
+    var newKind = ""
+    var oldBgn = ""
+    var newBgn = ""
+    val notes = ArrayList<String>()
+    val envelope = EnvelopeLog()
     val termed: Long get() = termedAbsent + termedFlagged
     val hasDifferences: Boolean get() = added + termed + changed > 0
 }
 
 private class Entry(val h1: Long, val h2: Long, val start: Long, val delim: Int) {
     var seen = false
+    var dup = false
 }
+
+private class ScanInfo(val sets: Int, val bgn: Set<String>)
 
 object Differ {
     private val BOUNDARY = setOf("SE", "GE", "IEA", "ISA", "GS", "ST")
 
-    /** Streams a file and reports each 834 member record. Returns the number of 834 transaction sets seen. */
-    private fun scan(path: Path, profile: Profile, onMember: (List<Segment>, Long, Delimiters) -> Unit): Int {
+    /** Streams a file and reports each 834 member record. Also feeds an envelope checker. */
+    private fun scan(
+        path: Path, profile: Profile, env: EnvelopeLog,
+        onMember: (List<Segment>, Long, Delimiters) -> Unit,
+    ): ScanInfo {
         var sets = 0
-        Files.newInputStream(path).use { ins ->
-            val r = X12Reader(ins)
-            var in834 = false
-            var cur: ArrayList<Segment>? = null
-            var curStart = 0L
-            var curDelim: Delimiters? = null
-            fun flush() {
-                val c = cur
-                if (c != null) onMember(c, curStart, curDelim!!)
-                cur = null
-            }
-            while (true) {
-                val s = r.next() ?: break
-                when (s.id) {
-                    "ST" -> {
-                        flush()
-                        in834 = s.el(1) == "834"
-                        if (in834) sets++
-                    }
-                    "SE", "GE", "IEA", "ISA", "GS" -> {
-                        flush()
-                        in834 = false
-                    }
-                    else -> if (in834) {
-                        if (s.id == profile.memberStart) {
-                            flush()
-                            cur = arrayListOf(s)
-                            curStart = s.offset
-                            curDelim = r.delimiters
-                        } else {
-                            cur?.add(s)
+        val bgn = LinkedHashSet<String>()
+        val chk = EnvelopeChecker()
+        try {
+            Files.newInputStream(path).use { ins ->
+                val r = X12Reader(ins)
+                var in834 = false
+                var cur: ArrayList<Segment>? = null
+                var curStart = 0L
+                var curDelim: Delimiters? = null
+                var curBgn: String? = null
+                fun flush() {
+                    val c = cur
+                    if (c != null) onMember(c, curStart, curDelim!!)
+                    cur = null
+                }
+                fun endSet() {
+                    if (in834) bgn.add(curBgn ?: "")
+                    in834 = false
+                    curBgn = null
+                }
+                while (true) {
+                    val s = r.next() ?: break
+                    chk.accept(s)
+                    when (s.id) {
+                        "ST" -> {
+                            flush(); endSet()
+                            in834 = s.el(1) == "834"
+                            if (in834) sets++
+                        }
+                        "SE", "GE", "IEA", "ISA", "GS" -> { flush(); endSet() }
+                        "BGN" -> if (in834 && curBgn == null) curBgn = s.el(8)
+                        else -> if (in834) {
+                            if (s.id == profile.memberStart) {
+                                flush()
+                                cur = arrayListOf(s)
+                                curStart = s.offset
+                                curDelim = r.delimiters
+                            } else {
+                                cur?.add(s)
+                            }
                         }
                     }
                 }
+                flush(); endSet()
+                chk.finish()
             }
-            flush()
+        } catch (e: X12Exception) {
+            throw X12Exception("${path.fileName}: ${e.message}")
+        } catch (e: java.nio.file.NoSuchFileException) {
+            throw X12Exception("File not found: $path")
+        } catch (e: java.io.IOException) {
+            throw X12Exception("Cannot read '${path.fileName}': ${e.message ?: e.javaClass.simpleName}")
         }
-        return sets
+        env.add(path.fileName.toString(), chk)
+        return ScanInfo(sets, bgn)
     }
 
-    fun diff(oldPath: Path, newPath: Path, profile: Profile, sink: (Row) -> Unit): DiffSummary {
+    private fun kindOf(values: Set<String>, profile: Profile): String {
+        if (values.isEmpty()) return "unknown"
+        val full = profile.list("mode.full.codes", listOf("4", "RX")).toSet()
+        val change = profile.list("mode.change.codes", listOf("2")).toSet()
+        val kinds = values.map { if (it in full) "full" else if (it in change) "change" else "unknown" }.toSet()
+        return if (kinds.size == 1) kinds.first() else "mixed"
+    }
+
+    fun diff(oldPath: Path, newPath: Path, profile: Profile, modeOverride: String? = null, sink: (Row) -> Unit): DiffSummary {
         val sum = DiffSummary()
         val index = HashMap<String, Entry>(1 shl 16)
         val delims = ArrayList<Delimiters>()
         val h = LongArray(2)
 
-        val oldSets = scan(oldPath, profile) { segs, start, d ->
+        val oldInfo = scan(oldPath, profile, sum.envelope) { segs, start, d ->
             sum.oldMembers++
             val key = profile.keyOf(segs)
             if (key.all { it == '|' }) sum.emptyKeys++
             var k = key
             var n = 1
             while (index.containsKey(k)) {
+                index[k]!!.dup = true
                 n++
                 k = "$key#$n"
             }
@@ -103,10 +146,14 @@ object Differ {
                 di = delims.size - 1
             }
             profile.hash(segs, h)
-            index[k] = Entry(h[0], h[1], start, di)
+            index[k] = Entry(h[0], h[1], start, di).also { if (n > 1) it.dup = true }
         }
-        if (oldSets == 0) throw X12Exception("No 834 transaction set (ST*834) found in '$oldPath'")
+        if (oldInfo.sets == 0) throw X12Exception("No 834 transaction set (ST*834) found in '$oldPath'")
 
+        // The new file is scanned next; the mode must be known before absent members are reported, so the
+        // BGN08 of the new file is only known afterwards. Absent members are reported after the scan anyway.
+        val gone = ArrayList<Pair<String, Entry>>()
+        var newInfo: ScanInfo? = null
         RandomAccessFile(oldPath.toFile(), "r").use { raf ->
             fun readOld(e: Entry): List<Segment> {
                 raf.seek(e.start)
@@ -121,7 +168,7 @@ object Differ {
                 return list
             }
 
-            val newSets = scan(newPath, profile) { segs, _, _ ->
+            newInfo = scan(newPath, profile, sum.envelope) { segs, _, _ ->
                 sum.newMembers++
                 val key = profile.keyOf(segs)
                 var k = key
@@ -132,9 +179,12 @@ object Differ {
                     k = "$key#$n"
                     e = index[k]
                 }
+                val ambiguous = n > 1 || (e != null && e.dup)
+                val amb = if (ambiguous) "ambiguous key (duplicate member key); " else ""
+                if (ambiguous) sum.ambiguousMembers++
                 if (e == null) {
                     sum.added++
-                    sink(Row("ADDED", k, "", "", "", "", "", "not present in old file"))
+                    sink(Row("ADDED", k, "", "", "", "", "", amb + "not present in old file"))
                     return@scan
                 }
                 e.seen = true
@@ -152,23 +202,58 @@ object Differ {
                 if (flagNew != null && flagOld == null) {
                     sum.termedFlagged++
                     type = "TERMED"
-                    detail = "termination flag: $flagNew"
+                    detail = amb + "termination flag: $flagNew"
                 } else {
                     sum.changed++
                     type = "CHANGED"
-                    detail = ""
+                    detail = amb.removeSuffix("; ")
                 }
                 val rows = fieldDiff(type, k, detail, oldSegs, segs, profile, delims[e.delim])
-                if (rows.isEmpty()) sink(Row(type, k, "", "", "", "", "", "content differs (segment order changed)"))
+                if (rows.isEmpty()) sink(Row(type, k, "", "", "", "", "", listOf(detail, "content differs (segment order changed)").filter { it.isNotEmpty() }.joinToString("; ")))
                 else rows.forEach(sink)
             }
-            if (newSets == 0) throw X12Exception("No 834 transaction set (ST*834) found in '$newPath'")
+            if (newInfo!!.sets == 0) throw X12Exception("No 834 transaction set (ST*834) found in '$newPath'")
+            for ((k, v) in index) if (!v.seen) gone.add(k to v)
         }
 
-        val gone = index.entries.filter { !it.value.seen }.sortedBy { it.value.start }
-        for ((k, _) in gone) {
-            sum.termedAbsent++
-            sink(Row("TERMED", k, "", "", "", "", "", "not present in new file"))
+        // ---- mode ----
+        val ni = newInfo!!
+        sum.oldKind = kindOf(oldInfo.bgn, profile)
+        sum.newKind = kindOf(ni.bgn, profile)
+        sum.oldBgn = oldInfo.bgn.joinToString(",") { it.ifEmpty { "(none)" } }
+        sum.newBgn = ni.bgn.joinToString(",") { it.ifEmpty { "(none)" } }
+        val mode: String
+        when {
+            modeOverride != null -> {
+                mode = modeOverride
+                sum.notes.add("Mode $mode set by --mode (OLD BGN08 ${sum.oldBgn} = ${sum.oldKind}, NEW BGN08 ${sum.newBgn} = ${sum.newKind}).")
+            }
+            sum.oldKind == "change" || sum.newKind == "change" -> {
+                mode = "change"
+                sum.notes.add("Mode change: OLD BGN08 ${sum.oldBgn} = ${sum.oldKind}, NEW BGN08 ${sum.newBgn} = ${sum.newKind}. " +
+                    "Members absent from the new file are reported as NOT_IN_NEW, not TERMED.")
+            }
+            sum.oldKind == "full" && sum.newKind == "full" -> mode = "full"
+            else -> {
+                mode = "full"
+                sum.notes.add("WARNING: BGN08 is unknown or mixed (OLD ${sum.oldBgn} = ${sum.oldKind}, NEW ${sum.newBgn} = ${sum.newKind}). " +
+                    "Treated as full files: members absent from the new file are reported as TERMED. " +
+                    "If these are change files, rerun with --mode change.")
+            }
+        }
+        sum.mode = mode
+
+        gone.sortBy { it.second.start }
+        for ((k, e) in gone) {
+            val amb = if (e.dup) "ambiguous key (duplicate member key); " else ""
+            if (e.dup) sum.ambiguousMembers++
+            if (mode == "change") {
+                sum.absentNotTermed++
+                sink(Row("NOT_IN_NEW", k, "", "", "", "", "", amb + "not in new file (change file: absence does not mean terminated)"))
+            } else {
+                sum.termedAbsent++
+                sink(Row("TERMED", k, "", "", "", "", "", amb + "not present in new file"))
+            }
         }
         return sum
     }
@@ -187,6 +272,9 @@ object Differ {
         }
         return out
     }
+
+    /** Element value with the file's sub-element separator replaced by ':' so files with different separators compare equal. */
+    private fun norm(s: Segment, v: String): String = if (s.sub == ':' || v.indexOf(s.sub) < 0) v else v.replace(s.sub, ':')
 
     internal fun fieldDiff(
         type: String, key: String, detail: String,
@@ -207,8 +295,8 @@ object Differ {
             val max = maxOf(o.elements.size, n.elements.size)
             for (p in 1..max) {
                 if (profile.elementIgnored(n, p)) continue
-                val ov = o.el(p)
-                val nv = n.el(p)
+                val ov = norm(o, o.el(p))
+                val nv = norm(n, n.el(p))
                 if (ov != nv) {
                     rows.add(Row(type, key, k.sig, n.id + p.toString().padStart(2, '0'), profile.label(n, p), ov, nv, detail))
                 }

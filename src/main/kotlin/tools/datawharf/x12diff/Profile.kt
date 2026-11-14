@@ -34,7 +34,7 @@ class Locator(val seg: String, val qual: String?, val pos: Int) {
 
 class Profile(
     val memberStart: String,
-    val keyParts: List<List<Locator>>,
+    val keyParts: List<List<List<Locator>>>,
     val termCodes: Set<String>,
     val termCode: Locator?,
     val termDates: List<Locator>,
@@ -56,22 +56,27 @@ class Profile(
     fun segmentIgnored(s: Segment): Boolean = hasIgnore && ignore.any { it.pos == 0 && it.matches(s) }
     fun elementIgnored(s: Segment, pos: Int): Boolean = hasIgnore && ignore.any { it.pos == pos && it.matches(s) }
 
-    /** Member key: for each key part, the first non-empty value among its alternatives; parts joined by '|'. */
+    /**
+     * Member key: for each key part, the first alternative that has a value; parts are joined by '|'.
+     * An alternative can combine several locators with '+', which are joined by '/'.
+     */
     fun keyOf(segs: List<Segment>): String {
         val sb = StringBuilder()
         for ((i, alts) in keyParts.withIndex()) {
             if (i > 0) sb.append('|')
             var v = ""
-            search@ for (alt in alts) {
-                for (s in segs) {
-                    if (alt.matches(s)) {
-                        val x = alt.value(s)
-                        if (x.isNotEmpty()) {
-                            v = x
-                            break@search
+            for (alt in alts) {
+                val vals = alt.map { loc ->
+                    var x = ""
+                    for (s in segs) {
+                        if (loc.matches(s)) {
+                            val y = loc.value(s)
+                            if (y.isNotEmpty()) { x = y; break }
                         }
                     }
+                    x
                 }
+                if (vals.any { it.isNotEmpty() }) { v = vals.joinToString("/"); break }
             }
             sb.append(v)
         }
@@ -95,7 +100,8 @@ class Profile(
                 h1 = (h1 xor 0x1F) * 0x100000001b3L
                 h2 = (h2 + 0x1F) * -0x61c8864680b583ebL
                 if (hasIgnore && elementIgnored(s, i + 1)) continue
-                for (ch in s.elements[i]) {
+                for (ch0 in s.elements[i]) {
+                    val ch = if (ch0 == s.sub) ':' else ch0
                     h1 = (h1 xor ch.code.toLong()) * 0x100000001b3L
                     h2 = (h2 + ch.code) * -0x61c8864680b583ebL
                     h2 = h2 xor (h2 ushr 29)
@@ -135,10 +141,17 @@ class Profile(
 member.start = INS
 
 # Member key: key parts are joined with '|'. Each part lists alternatives separated by '|';
-# the first non-empty value is used.
+# the first alternative with a value is used. Several locators joined by '+' are combined.
 key.1 = REF*0F:02
-key.2 = NM1*IL:09 | REF*1L:02
+# key.2: the member id if present, otherwise last name + first name + birth date joined with '+'.
+key.2 = NM1*IL:09 | NM1*IL:03 + NM1*IL:04 + DMG:02
 key.3 = INS:02
+
+# File mode, read from BGN08 of each 834: values in mode.full.codes mean the file lists everyone (so a member
+# missing from the new file is TERMED); values in mode.change.codes mean a change file (a missing member is just
+# not changed, reported as NOT_IN_NEW). Override with --mode full|change on the command line.
+mode.full.codes = 4, RX
+mode.change.codes = 2
 
 # A member counts as TERMED when it appears flagged in the new file but was not flagged in the old one.
 # Flag = the value at term.code is one of term.codes, or any term.dates locator has a value.
@@ -165,15 +178,22 @@ label.HD:03 = line code
 # ---- remit / recon (values are codes only; descriptions are yours to add) ----
 # Claim status values (CLP02 in an 835) that mark a reversal.
 recon.reversal.codes = 22
-# A remit counts as PAID when paid >= charge * ratio, otherwise PARTIAL. Lower it (e.g. 0.8) for contracted rates.
-recon.paid.min.ratio = 1.0
-# Claim date in the 837 (first match inside the claim), then a fallback seen before the first claim of the set.
-recon.claim.date = DTP*472:03
+# Claim status values that mark a denial. A claim with zero paid and one of these is DENIED.
+recon.denied.codes = 4
+# Zero paid with patient responsibility and no denial status is PATIENT_RESP, not DENIED.
+# Adjustments (GROUP-REASON) that are the normal contractual write-off. A paid claim is PAID when the only
+# adjustments are these and patient responsibility (PR); any other adjustment makes it PARTIAL.
+recon.contractual = CO-45
+# Claim date in the 837: the first match inside the claim for each locator, in this order, then the fallback
+# (a segment seen before the first claim of the set).
+recon.claim.date = DTP*472:03, DTP*434:03
 recon.claim.date.fallback = BHT:04
 # Acknowledgement status values (IK5/AK5 element 1, AK9 element 1) that count as rejected.
-recon.ack.reject.codes = R
-# Claim-status category values (first part of STC01 in a 277CA) that count as rejected.
+recon.ack.reject.codes = R, M, W, X
+# Claim-status category values (first part of STC01 in a 277CA) that reject a claim, and those that clear an
+# earlier rejection when they arrive later.
 recon.status.reject.categories = A3, A4, A6, A7, A8
+recon.status.accept.categories = A0, A1, A2
 # Optional labels for the adjustment rollup, written as adjlabel.GROUP-REASON
 # adjlabel.CO-45 = your label here
 """
@@ -203,7 +223,7 @@ recon.status.reject.categories = A3, A4, A6, A7, A8
 
             val keyParts = map.keys.filter { it.startsWith("key.") }
                 .sortedBy { it.removePrefix("key.").toIntOrNull() ?: throw X12Exception("Profile $source: bad key name '$it' (use key.1, key.2, ...)") }
-                .map { k -> list(map[k], '|').map { Locator.parse(it, k) }.also { if (it.isEmpty() || it.any { l -> l.pos == 0 }) throw X12Exception("Profile $source: $k needs locators with element positions, e.g. REF*0F:02") } }
+                .map { k -> list(map[k], '|').map { alt -> alt.split('+').map { Locator.parse(it, k) } }.also { if (it.isEmpty() || it.any { a -> a.any { l -> l.pos == 0 } }) throw X12Exception("Profile $source: $k needs locators with element positions, e.g. REF*0F:02") } }
             if (keyParts.isEmpty()) throw X12Exception("Profile $source: at least one key.N line is required")
             val termCode = map["term.code"]?.takeIf { it.isNotEmpty() }?.let { Locator.parse(it, "term.code") }
             if (termCode != null && termCode.pos == 0) throw X12Exception("Profile $source: term.code needs an element position")

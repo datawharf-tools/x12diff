@@ -15,7 +15,7 @@ object GenClaims {
     class Result(
         val claims: Long, val sets837: Int,
         val paid: Long, val partial: Long, val denied: Long, val reversed: Long, val adjusted: Long,
-        val unmatched: Long, val rejectedBySet: Long, val rejectedBy277: Long, val orphans: Long,
+        val unmatched: Long, val rejectedBySet: Long, val rejectedBy277: Long, val orphans: Long, val patientResp: Long,
         val remitEntries: Long, val remitChecks: Long, val netPaidCents: Long, val chargedCents: Long,
         val rejectedSets: Int,
     ) {
@@ -32,7 +32,7 @@ object GenClaims {
     private fun unit(seed: Long, salt: Long, n: Long): Double =
         (mix(seed xor (n * 0x2545F4914F6CDD1DL) xor (salt * 0x9E3779B97F4A7C15uL.toLong())) ushr 11).toDouble() / (1L shl 53).toDouble()
 
-    private enum class V { PAID, PARTIAL, DENIED, REVERSED, ADJUSTED, UNMATCHED, REJ277 }
+    private enum class V { PAID, PARTIAL, DENIED, REVERSED, ADJUSTED, UNMATCHED, REJ277, PATRESP }
 
     private fun variant(seed: Long, n: Long): V {
         val r = unit(seed, 1, n)
@@ -44,6 +44,7 @@ object GenClaims {
             r < 0.80 -> V.ADJUSTED
             r < 0.87 -> V.UNMATCHED
             r < 0.92 -> V.REJ277
+            r < 0.95 -> V.PATRESP
             else -> V.PAID
         }
     }
@@ -52,7 +53,7 @@ object GenClaims {
     private fun id(n: Long) = "PCN" + n.toString().padStart(8, '0')
     private fun dateOf(n: Long): String = LocalDate.of(2026, 1, 1).plusDays(n % 120).toString().replace("-", "")
 
-    private class Doc(path: Path, val term: String, gsFn: String, gsVer: String) {
+    private class Doc(path: Path, val term: String, gsFn: String, gsVer: String, snd: String = "SENDERTEST", rcv: String = "RECEIVERTEST") {
         val w: BufferedWriter = Files.newBufferedWriter(
             path, StandardCharsets.ISO_8859_1, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING
         )
@@ -61,8 +62,8 @@ object GenClaims {
         private var ctl = 0
 
         init {
-            raw("ISA*00*          *00*          *ZZ*SENDERTEST     *ZZ*RECEIVERTEST   *260101*1200*^*00501*000000001*0*T*:")
-            raw("GS*$gsFn*SENDERTEST*RECEIVERTEST*20260101*1200*1*X*$gsVer")
+            raw("ISA*00*          *00*          *ZZ*" + snd.padEnd(15) + "*ZZ*" + rcv.padEnd(15) + "*260101*1200*^*00501*000000001*0*T*:")
+            raw("GS*$gsFn*$snd*$rcv*20260101*1200*1*X*$gsVer")
         }
 
         private fun raw(s: String) { w.write(s); w.write(term) }
@@ -100,17 +101,22 @@ object GenClaims {
         val (c1, c2) = lineAmounts(charge)
         val codes = listOf("99213", "99214")
         val cs = listOf(c1, c2)
+        fun paidLines(reason: String, share: Double) = cs.indices.map { i ->
+            val co = Math.round(cs[i] * share)
+            Line(codes[i], cs[i], cs[i] - co, listOf(Triple("CO", reason, co)))
+        }
         return when (role) {
-            "paid" -> Entry(id(n), "1", charge, charge, emptyList(), cs.indices.map { Line(codes[it], cs[it], cs[it], emptyList()) })
+            "paid" -> { val lines = paidLines("45", 0.1); Entry(id(n), "1", charge, lines.sumOf { it.paid }, emptyList(), lines) }
             "partial" -> {
                 val lines = cs.indices.map { i ->
                     val paid = Math.round(cs[i] * 0.6); val pr = Math.round(cs[i] * 0.1); val co = cs[i] - paid - pr
-                    Line(codes[i], cs[i], paid, listOf(Triple("CO", "45", co), Triple("PR", "1", pr)))
+                    Line(codes[i], cs[i], paid, listOf(Triple("CO", "97", co), Triple("PR", "1", pr)))
                 }
                 Entry(id(n), "1", charge, lines.sumOf { it.paid }, emptyList(), lines)
             }
             "denied" -> Entry(id(n), "4", charge, 0, listOf(Triple("CO", "50", charge)), cs.indices.map { Line(codes[it], cs[it], 0, emptyList()) })
-            "reversal" -> Entry(id(n), "22", -charge, -charge, emptyList(), cs.indices.map { Line(codes[it], -cs[it], -cs[it], emptyList()) })
+            "patresp" -> Entry(id(n), "1", charge, 0, emptyList(), cs.indices.map { Line(codes[it], cs[it], 0, listOf(Triple("PR", "1", cs[it]))) })
+            "reversal" -> negate(entry(n, charge, "paid", seed))
             "repay" -> {
                 val lines = cs.indices.map { i ->
                     val paid = Math.round(cs[i] * 0.8)
@@ -118,10 +124,15 @@ object GenClaims {
                 }
                 Entry(id(n), "1", charge, lines.sumOf { it.paid }, emptyList(), lines)
             }
-            "orphan" -> Entry("ORPH" + n.toString().padStart(6, '0'), "1", charge, charge, emptyList(), cs.indices.map { Line(codes[it], cs[it], cs[it], emptyList()) })
+            "orphan" -> { val e = entry(n, charge, "paid", seed); Entry("ORPH" + n.toString().padStart(6, '0'), "1", e.charge, e.paid, e.claimAdj, e.lines) }
             else -> error(role)
         }
     }
+
+    private fun negate(e: Entry): Entry = Entry(
+        e.id, "22", -e.charge, -e.paid, e.claimAdj.map { Triple(it.first, it.second, -it.third) },
+        e.lines.map { l -> Line(l.code, -l.charge, -l.paid, l.adj.map { Triple(it.first, it.second, -it.third) }) },
+    )
 
     private fun patientResp(e: Entry): Long = e.lines.sumOf { l -> l.adj.filter { it.first == "PR" }.sumOf { it.third } }
 
@@ -177,7 +188,7 @@ object GenClaims {
         fun effective(n: Long): V? = if (setRejected[setOf(n)]) null else variant(seed, n)
 
         var paid = 0L; var partial = 0L; var denied = 0L; var reversed = 0L; var adjusted = 0L
-        var unmatched = 0L; var rejSet = 0L; var rej277 = 0L; var charged = 0L
+        var unmatched = 0L; var rejSet = 0L; var rej277 = 0L; var charged = 0L; var patresp = 0L
         for (n in 1..claims) {
             charged += chargeOf(seed, n)
             when (effective(n)) {
@@ -189,6 +200,7 @@ object GenClaims {
                 V.ADJUSTED -> adjusted++
                 V.UNMATCHED -> unmatched++
                 V.REJ277 -> rej277++
+                V.PATRESP -> patresp++
             }
         }
         val orphans = maxOf(1L, claims / 200)
@@ -225,6 +237,7 @@ object GenClaims {
                     V.PAID -> yield(entry(n, ch, "paid", seed))
                     V.PARTIAL -> yield(entry(n, ch, "partial", seed))
                     V.DENIED -> yield(entry(n, ch, "denied", seed))
+                    V.PATRESP -> yield(entry(n, ch, "patresp", seed))
                     V.REVERSED, V.ADJUSTED -> yield(entry(n, ch, "paid", seed))
                     else -> {}
                 }
@@ -246,7 +259,7 @@ object GenClaims {
         val entries = (claims - unmatched - rej277 - rejSet) + reversed + adjusted * 2 + orphans
 
         // 999
-        val d999 = Doc(dir.resolve("ack.999"), term, "FA", "005010X231A1")
+        val d999 = Doc(dir.resolve("ack.999"), term, "FA", "005010X231A1", "RECEIVERTEST", "SENDERTEST")
         d999.st("999", "005010X231A1")
         d999.seg("AK1*HC*1*005010X222A1")
         var rejectedSets = 0
@@ -259,7 +272,7 @@ object GenClaims {
         d999.close()
 
         // 277CA
-        val d277 = Doc(dir.resolve("status.277"), term, "HN", "005010X214")
+        val d277 = Doc(dir.resolve("status.277"), term, "HN", "005010X214", "RECEIVERTEST", "SENDERTEST")
         d277.st("277", "005010X214")
         d277.seg("BHT*0085*08*TESTSTATUS*20260102*1200*TH")
         var hl = 1
@@ -275,10 +288,10 @@ object GenClaims {
         d277.close()
 
         return Result(
-            claims, setCount, paid, partial, denied, reversed, adjusted, unmatched, rejSet, rej277, orphans,
-            entries, (checks1 + checks2).toLong(), net1 + net2 - orphanPaid(orphans), charged, rejectedSets,
+            claims, setCount, paid, partial, denied, reversed, adjusted, unmatched, rejSet, rej277, orphans, patresp,
+            entries, (checks1 + checks2).toLong(), net1 + net2 - orphanPaid(orphans, seed), charged, rejectedSets,
         )
     }
 
-    private fun orphanPaid(k: Long): Long = (1..k).sumOf { 7500 + it }
+    private fun orphanPaid(k: Long, seed: Long): Long = (1..k).sumOf { entry(it, 7500 + it, "orphan", seed).paid }
 }

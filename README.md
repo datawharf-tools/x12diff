@@ -3,9 +3,9 @@
 A free command-line tool for healthcare X12 files, from Datawharf Tools.
 
 - `x12diff parse FILE` summarizes a file: interchanges, functional groups, transaction sets by type (834, 837, 835, 999, 277CA, TA1 and so on), segment counts, and envelope control-number mismatches as warnings.
-- `x12diff diff OLD NEW` compares two 834 member files and reports who was ADDED, TERMED, CHANGED (field by field: segment, element, old value, new value) and how many are UNCHANGED. It writes a CSV with one row per change.
+- `x12diff diff OLD NEW` compares two 834 member files and reports who was ADDED, TERMED, CHANGED (field by field: segment, element, old value, new value) and how many are UNCHANGED. It reads BGN08 to tell full files from change files (see "How the diff works"). It writes a CSV with one row per change.
 - `x12diff remit FILES...` flattens 835 remittances to one CSV row per service line, rolls up adjustments by group and reason code, and checks that each claim and each check balances.
-- `x12diff recon FILES...` matches 837 claims to 835 payments and tells you which claims are PAID, PARTIAL, DENIED, REVERSED, ADJUSTED, UNMATCHED (no remit yet, with aging), REJECTED before adjudication (999 or 277CA), or ORPHAN remits with no claim.
+- `x12diff recon FILES...` matches 837 claims to 835 payments and tells you which claims are PAID, PARTIAL, DENIED, PATIENT_RESP, REVERSED, ADJUSTED, UNMATCHED (no remit yet, with aging), REJECTED before adjudication (999 or 277CA), or ORPHAN remits with no claim.
 - It streams. Memory depends on the number of members (diff) or claims (recon), not on file size. Two synthetic 300 MB 834 files diff in about 8 seconds, and a synthetic 295 MB 837/835/999/277 set reconciles in about 6 seconds with a 512 MB heap.
 
 **Privacy: x12diff runs entirely on your machine and makes no network connections.** It has no telemetry, no update check and no network code. It reads the files you name and writes the CSV you ask for.
@@ -20,11 +20,13 @@ java -jar x12diff.jar diff last_month.834 this_month.834 --csv changes.csv
 java -jar x12diff.jar diff old.834 new.834 --profile my-profile.properties
 ```
 
-Exit codes: `0` ok (diff: no differences), `1` diff found differences, `2` error. Errors print a one-line message, never a stack trace.
+Exit codes: `0` ok (`diff`: no differences), `1` `diff` found differences, `2` error, `3` input incomplete or inconsistent. Errors print a one-line message, never a stack trace.
 
-Exit codes for `remit` and `recon`: `0` ok, `2` error. Findings (warnings, unmatched claims) are in the report, not the exit code.
+**Incomplete input.** `diff`, `remit` and `recon` check the envelopes of every file they read. A missing SE, GE or IEA (for example after a cut-off transfer), or a segment-count or control-number mismatch, prints a loud `INPUT INCOMPLETE OR INCONSISTENT` notice on the console and on stderr, and the command exits with `3`. The report is still written, but do not trust it. Pass `--allow-incomplete` to accept such files knowingly.
 
-Options for `diff`: `--csv FILE`, `--profile FILE`, `--show N` (changes echoed to the console, default 20), `--stats` (elapsed time and heap use).
+Options for `diff`: `--csv FILE`, `--profile FILE`, `--mode full|change` (see below), `--show N` (changes echoed to the console, default 20), `--stats` (elapsed time and heap use), `--allow-incomplete`.
+
+Inputs for `remit` and `recon` can be files, folders (every X12 file in the folder; other files are skipped and named) or a wildcard in the file name such as `"C:/remits/*.835"`. Paths with spaces work when quoted.
 
 ## Examples (synthetic data)
 
@@ -70,29 +72,32 @@ Envelope warnings look like `Control number mismatch: ST02=0001 but SE02=0002 (s
 
 ```
 x12diff remit remits_1.835 remits_2.835 --csv lines.csv --rollup adjustments.csv
-x12diff remit C:emits6-11\ --csv lines.csv        (a folder: every X12 file in it)
-x12diff remit "C:emits\*.835" --csv lines.csv           (a wildcard in the file name)
+x12diff remit "C:/remits/2026-11" --csv lines.csv        (a folder: every X12 file in it)
+x12diff remit "C:/remits/*.835" --csv lines.csv          (a wildcard in the file name; backslashes work too)
 ```
 
-Synthetic output:
+Synthetic output (`x12diff gen --kind claims --claims 2000 --dir demo --seed 4`):
 
 ```
 Files: 2   835 checks: 20
 Claims: 1,910   Service lines: 3,820
-Charged: 386982.50   Paid: 307194.50   Paid/charged: 79.4%   Patient responsibility: 8953.87
+Charged: 386982.50   Paid: 270751.67   Paid/charged: 70.0%   Patient responsibility: 22952.25
 Adjustments by group-reason (count, amount):
   CO-50           150          40214.18
-  CO-45           882          30619.95
-  PR-1            740           8953.87
+  CO-97           740          26859.71
+  CO-45         2,662          26204.69
+  PR-1            858          22952.25
 Warnings: 0
 ```
 
-`lines.csv` columns: `file, check_number, payment_date, payer_id, payee_id, claim_id, claim_status, claim_charge, claim_paid, patient_resp, payer_claim_ctrl, service_qualifier, service_code, service_modifiers, units, line_charge, line_paid, line_adjustments, claim_adjustments`. Adjustments are written as `GROUP:REASON:AMOUNT` and joined with `|`, so a line with several adjustments stays on one row. Claim-level adjustments repeat on each line of the claim.
+`lines.csv` columns: `file, check_number, payment_date, payer_id, payee_id, claim_id, claim_status, claim_charge, claim_paid, patient_resp, payer_claim_ctrl, service_qualifier, service_code, service_modifiers, units, line_charge, line_paid, line_adjustments, claim_adjustments`. Adjustments are written as `GROUP:REASON:AMOUNT` and joined with `|`, so a line with several adjustments stays on one row. Claim-level adjustments repeat on each line of the claim. `payer_id` is N1*PR element 4, or REF*2U element 2 when that is empty.
 
 Checks, reported as warnings with the check number and claim ID:
 
-- per claim: charge - paid - adjustments must be zero (claim-level adjustments if present, otherwise the line-level ones), and the service-line paid amounts must add up to the claim paid amount;
+- per claim: charge - paid - (claim-level adjustments + line-level adjustments) must be zero, and the service-line paid amounts must add up to the claim paid amount, or to that amount plus the claim-level adjustments;
 - per check: BPR02 must equal the sum of CLP04 minus the PLB adjustments.
+
+An amount that is not a valid number (for example `100.005`) is never turned into 0.00. The CSV keeps the raw text, the amount is left out of the totals and counted in a warning, and the balance checks that depend on it are skipped.
 
 Only codes are shown. To get readable text in the rollup, add `adjlabel.CO-45 = your text` lines to a profile and pass `--profile`. x12diff ships no description text for any code.
 
@@ -100,33 +105,38 @@ Only codes are shown. To get readable text in the rollup, add `adjlabel.CO-45 = 
 
 ```
 x12diff recon claims.837 remits_1.835 remits_2.835 ack.999 status.277 --asof 20260601 --csv recon.csv
-x12diff recon C:\month-end\ --csv recon.csv
+x12diff recon "C:/month-end" --csv recon.csv
 ```
 
-Files can be given in any order, or as folders. x12diff recognizes the transaction type inside each file (837, 835, 999 or 997, 277), so you can mix them. Synthetic output:
+Files can be given in any order, or as folders. x12diff recognizes the transaction type inside each file (837, 835, 999 or 997, 277), so you can mix them. Synthetic output (`x12diff recon demo --asof 20260601`):
 
 ```
 Files: 5   837 claims: 2,000 in 50 sets   835 claim entries: 1,910 on 20 checks
-Acknowledgement sets: 1 (3 837 sets rejected)   277CA claim statuses: 242
-PAID:      951
-PARTIAL:   370
-DENIED:    150
-REVERSED:  108
-ADJUSTED:  71
-UNMATCHED: 131
-REJECTED:  219
-ORPHAN:    10
-Charged (837): 503572.20   Paid (matched 835s, net): 306443.95
-UNMATCHED aging (days since claim date): 0-30: 0  31-60: 32  61-90: 35  91+: 64  unknown: 0
+Acknowledgement sets: 1 (3 837 sets rejected)   277CA claim statuses: 239
+PAID:         892
+PARTIAL:      370
+DENIED:       150
+PATIENT_RESP: 59
+REVERSED:     108
+ADJUSTED:     71
+UNMATCHED:    131
+REJECTED:     219
+ORPHAN:       10
+Charged (837): 503572.20   Paid (matched 835s, net): 270076.15
+UNMATCHED aging (days since claim date): 0-30: 0  31-60: 32  61-90: 35  91+: 64  future: 0  unknown: 0
+Warnings: 0
 ```
 
 How claims are classified:
 
-- A claim matches a remit entry when CLM01 equals CLP01 (when several claims share an ID, the one with the same charge wins). A charge difference is flagged in `detail`.
+- A claim matches remit entries by CLM01 = CLP01. When the 837 input holds the same CLM01 more than once (resubmissions, corrected claims), x12diff warns and picks the claim by absolute charge, then the payer claim control number (CLP07), then by whether the claim already has a payment or a reversal waiting for repayment. A reversal therefore lands on the claim that holds its original payment, and a repayment on the same claim. If two duplicate claims have the same charge the match can still be wrong, and the warning says so. A paid amount above the 837 charge is flagged.
 - Amounts for one claim are summed across all remit entries, so an original payment, a reversal and a repayment net out. If any entry has a reversal status (profile `recon.reversal.codes`, default 22): REVERSED when the net paid is zero or less, ADJUSTED when money is still paid.
-- Otherwise: DENIED when paid is zero, PAID when paid >= charge x `recon.paid.min.ratio` (default 1.0, lower it for contracted-rate payers), else PARTIAL.
-- No remit yet: UNMATCHED, aged by days from the claim date to `--asof` (default today). The claim date is the first `recon.claim.date` match in the claim (default `DTP*472:03`), else `recon.claim.date.fallback` (default `BHT:04`).
-- REJECTED before adjudication, only when no remit exists: the 999 (or 997) rejected the claim's transaction set (IK5 or AK5 element 1 in `recon.ack.reject.codes`, default `R`, tied back to the 837 by the GS06/ST02 control numbers; AK9 rejects a whole group), or a 277CA claim-level status has a category in `recon.status.reject.categories` (default A3, A4, A6, A7, A8; claims are tied by the patient control number in TRN02).
+- Otherwise, with zero paid: DENIED when an entry has a denial status (`recon.denied.codes`, default 4) or there is no patient responsibility; PATIENT_RESP when there is patient responsibility (for example the whole amount went to the deductible), because that claim was processed, not denied.
+- Otherwise, with money paid: PAID when the only adjustments are patient responsibility (PR) and the contractual write-off (`recon.contractual`, default `CO-45`), PARTIAL when any other adjustment reduced the payment. A claim with no adjustment segments at all is PARTIAL if paid plus patient responsibility is below the charge. Add the contractual codes your payers use to `recon.contractual`.
+- No remit yet: UNMATCHED, aged by days from the claim date to `--asof` (default today). A claim date after `--asof` goes in the `future` bucket. The claim date is the first match of each `recon.claim.date` locator in the claim (default `DTP*472:03`, then `DTP*434:03`; a date range uses its first date), else `recon.claim.date.fallback` (default `BHT:04`).
+- REJECTED before adjudication, only when no remit exists:
+  - a 999 or 997 rejected the claim's transaction set (IK5 or AK5 element 1 in `recon.ack.reject.codes`, default R, M, W, X; AK9 rejects a whole group). The 999 is tied to the 837 by GS06 and ST02. If several 837 sets share those numbers, the sender and receiver in the GS segments and then the file name (`jan.837` with `jan.999`) decide. If that still leaves more than one candidate, nothing is marked and a warning says why, so a rejection is never applied to the wrong month;
+  - or a 277CA claim-level status has a category in `recon.status.reject.categories` (default A3, A4, A6, A7, A8; claims are tied by the patient control number in TRN02, and by the charge in STC04 if the ID is duplicated). Service-line statuses are ignored. The newest status (by STC02 date) wins, and an acceptance (`recon.status.accept.categories`, default A0, A1, A2) clears an earlier rejection. On the same date an acceptance wins.
 - ORPHAN: an 835 entry with no matching 837 claim.
 
 `recon.csv` has one row per claim, then the orphans: `status, claim_id, claim_charge, remit_charge, paid, patient_resp, claim_date, age_days, reject_source, detail`.
@@ -134,10 +144,11 @@ How claims are classified:
 ## How the diff works
 
 1. Each member record starts at the segment named by `member.start` (default `INS`) and runs to the next one or the end of the transaction set.
-2. The member key is built from the profile's `key.N` lines (default: `REF*0F:02`, then `NM1*IL:09` or `REF*1L:02`, then `INS:02`). Duplicate keys get `#2`, `#3` suffixes in file order.
+2. The member key is built from the profile's `key.N` lines. Default: `REF*0F:02`, then `NM1*IL:09` or, when that is empty, last name + first name + birth date (`NM1*IL:03 + NM1*IL:04 + DMG:02`), then `INS:02`. Siblings without their own ID are therefore told apart by name and birth date. Duplicate keys get `#2`, `#3` suffixes in file order, the console warns, and every row for such a member says `ambiguous key` because it may be matched to the wrong person.
 3. The old file is indexed by key with a 128-bit content hash and a file offset. The new file is then streamed once. Members with equal hashes are UNCHANGED. For the others, only that member is re-read from the old file for the field-level comparison.
-4. TERMED means the member is missing from the new file, or it carries a termination flag in the new file that it did not carry in the old one. The flag is a value from `term.codes` at `term.code`, or a value at any `term.dates` locator.
-5. Repeating segments are matched between files by the element listed in `align` (for example `REF:01`), otherwise by order.
+4. TERMED means the member carries a termination flag in the new file that it did not carry in the old one (a value from `term.codes` at `term.code`, or a value at any `term.dates` locator), or, **in full-file mode only**, the member is missing from the new file.
+5. Repeating segments are matched between files by the element listed in `align` (for example `REF:01`), otherwise by order. Sub-element separators are normalized, so a partner switching from `:` to `>` does not show as a change.
+6. **Full or change files.** BGN08 of each 834 is read (profile `mode.full.codes`, default 4 and RX; `mode.change.codes`, default 2). A change file lists only the members that changed, so a member missing from the new file was simply not changed. If either file is a change file, the mode is `change`: absent members are reported as `NOT_IN_NEW` and are not counted as TERMED. If both are full files, absent members are TERMED. If BGN08 is missing, unrecognized or mixed, x12diff warns, says which mode it used (full) and tells you to rerun with `--mode change` if needed. `--mode full|change` overrides the detection. The console always prints both BGN08 values and the mode.
 
 ## Profiles
 
@@ -149,11 +160,13 @@ x12diff refers to segments by their IDs and elements by their positions only. It
 
 All CSV output is protected against spreadsheet formula injection. A cell that starts with `=`, `@`, a tab or a carriage return gets a leading apostrophe. A cell that starts with `+` or `-` gets one too, unless the whole cell is a plain number (digits with an optional decimal part), so `-12.50` stays a number and `-1+2` becomes `'-1+2`. Standard CSV quoting is applied after that.
 
+CSV files are written as UTF-8 with a byte-order mark, so Excel shows accented characters correctly. X12 files are read byte by byte; when the bytes of a value are valid UTF-8 they are decoded as UTF-8, otherwise as ISO-8859-1.
+
 ## Synthetic data
 
-`x12diff gen --members N --old OLD --new NEW [--seed S] [--newlines] [--sets K]` writes a fake old/new pair with names like `TESTPERSON0000001`, IDs starting `SUB` or `999`, and phone numbers in the 555 range. About 1 percent of members are removed, 1 percent flagged by code, 1 percent flagged by date, 2 percent have an address change, 1 percent a line change, and 1 percent are added. It prints the expected counts so you can check the diff. No real data is ever used or needed.
+`x12diff gen --members N --old OLD --new NEW [--seed S] [--newlines] [--sets K]` writes a fake old/new pair with names like `TESTPERSON0000001`, IDs starting `SUB` or `999`, and phone numbers 800-555-0100 to 800-555-0199, which are reserved for fiction. About 1 percent of members are removed, 1 percent flagged by code, 1 percent flagged by date, 2 percent have an address change, 1 percent a line change, and 1 percent are added. It prints the expected counts so you can check the diff. The files are full files (BGN08 = 4). No real data is ever used or needed.
 
-`x12diff gen --kind claims --claims N --dir DIR [--seed S] [--newlines] [--set-size K]` writes a consistent `claims.837`, `remits_1.835`, `remits_2.835` (reversals and repayments), `ack.999` and `status.277`, with claim IDs like `PCN00000001` and no names at all. It prints the counts that `recon` should report. The synthetic reversal checks may net to a negative total, which a real check would not.
+`x12diff gen --kind claims --claims N --dir DIR [--seed S] [--newlines] [--set-size K]` writes a consistent `claims.837`, `remits_1.835`, `remits_2.835` (reversals and repayments), `ack.999` and `status.277`, with claim IDs like `PCN00000001` and no names at all. It prints the counts that `recon` should report. The 999 and 277 mirror the GS sender and receiver of the 837. The synthetic reversal checks may net to a negative total, which a real check would not.
 
 ## Build
 
@@ -164,9 +177,12 @@ All CSV output is protected against spreadsheet formula injection. A cell that s
 
 ## Pro (coming)
 
-- Desktop GUI with a claim-to-remit drill-down and a guided 999/277CA trace view, built on the same engine
-- Excel export
-- Saved trading-partner profiles
+The command-line tool stays fully free: parse, diff, remit and recon, including the 999/277CA tracer. Pro ($99 a year) is for people who do not want a command line:
+
+- Desktop app (no command line)
+- Excel workbook reports
+- Saved per-trading-partner profiles
+- Folder watching
 
 Details and waitlist: https://datawharftools.com/x12
 

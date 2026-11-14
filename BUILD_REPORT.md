@@ -1,4 +1,4 @@
-# x12diff 0.2.0 build report (0.1.0 results kept below under Milestone 1)
+# x12diff 0.2.1 build report (0.1.0 and 0.2.0 sections kept below)
 
 Built 2026-11-14 on Windows 11, Temurin JDK 21.0.11, Gradle 9.4.1, Kotlin 2.2.21. Runtime dependencies: none (Kotlin stdlib only).
 
@@ -30,7 +30,6 @@ Heap-limit check: the same 300 MB diff completes with `-Xmx256m` in 7.7 s. The w
 - Comparison is on whole element values; sub-elements are not split.
 - Only `ST*834` sets are diffed. Other transaction types are parsed and summarized only.
 - Dependents are handled only through the key (default key includes INS02 and a member ID); profile tuning may be needed for a trading partner's files.
-- No CSV formula-injection escaping; open CSVs from untrusted partners with care.
 
 ## Milestone 2 (0.2.0): CSV escaping, remit, recon, claims generator
 
@@ -59,3 +58,48 @@ Limits and judgement calls (milestone 2):
 - Adjustment amounts are parsed to cents; amounts with more than two non-zero decimals are reported as invalid.
 - The synthetic reversal checks can net negative, which a real check would not.
 - The CLI now includes the 999/277CA tracer and the 837 to 835 recon, so the README's "Pro (coming)" list was reworded to GUI, Excel export and saved profiles. The owner should decide the free/Pro split before publishing.
+
+## 0.2.1: fixes from REVIEW_1.md
+
+52 unit tests, all passing (27 earlier + 25 in RegressionTests.kt, one or more per finding, using the reviewer's repros).
+
+| Finding | Status | Fix |
+|---|---|---|
+| C1 change files termed everyone | Fixed | BGN08 read; change mode reports `NOT_IN_NEW`, full mode `TERMED`; mixed/unknown warns and says full was used; `--mode full\|change`; modes printed; README caveat |
+| C2 truncated NEW file | Fixed | Envelope checker runs on every file in diff/remit/recon; loud notice on stdout and stderr, exit 3, `--allow-incomplete` |
+| C3 duplicate CLM01 | Fixed | Warns on every duplicate; matches by abs(charge), payer control number, reversal/repay state; reviewer case gives ADJUSTED 180.00 and the other claim UNMATCHED; paid > charge flagged |
+| C4 999 collisions | Fixed | Candidates narrowed by GS sender/receiver then file name; still ambiguous = nothing marked plus warning. The brief asked for ISA13 too: a 999 does not carry the 837's ISA13, so ISA13 separates interchanges internally only |
+| H1 stack traces, wildcards | Fixed | Wildcards split before `Paths.get`; invalid paths and negative `--show` give one-line errors; catch-all in `run()` |
+| H2 zero paid to patient resp = DENIED | Fixed | New status PATIENT_RESP; DENIED needs a denial status code (default 4) or no patient responsibility |
+| H3 personal identity in history | Fixed | History rewritten, see the commit log; repo-local identity set to Datawharf Tools |
+| H4 siblings collapsed | Fixed | Default key falls back to name + birth date; duplicate keys warn and rows say `ambiguous key` |
+| M1 claim + line CAS | Fixed | Balance adds claim and line adjustments; line paid check allows the claim-level adjustments |
+| M2 invalid amounts as 0.00 | Fixed | Raw text kept in CSV, excluded from totals, counted; bad PLB warns and skips the check total |
+| M3 truncated 837 in recon | Fixed | Warns ("cut off") and exit 3 |
+| M4 277CA acceptance | Fixed | Newest STC02 date wins; acceptance clears a rejection; same date: acceptance wins |
+| M5 non-ASCII | Fixed | Valid UTF-8 byte sequences decoded; CSV written as UTF-8 with BOM |
+| M6 PAID ratio default | Fixed | PAID = only PR and contractual (`recon.contractual`, default CO-45) adjustments; other adjustments = PARTIAL; `recon.paid.min.ratio` removed |
+| M7 README control chars, phones | Fixed | README rewritten and checked by a test; phones 800-555-0100..0199 |
+| L1 RD8, DTP*434 | Fixed | First date of a range; DTP*472 then DTP*434 |
+| L2 reject codes | Fixed | Default R, M, W, X |
+| L3 sub-element separator | Fixed | Composites normalized before hashing and comparing |
+| L4 multi-ISA parse, 837 flavours | Fixed | One Delimiters line per interchange; 837P/837I/837D labels |
+| L5 payer_id | Fixed | Falls back to REF*2U |
+| L6 stale docs | Fixed | Stale line removed; README samples now carry the seed and command that reproduce them |
+| L7 error wording | Fixed | Missing output folder, folder passed to parse, skipped non-X12 files named |
+| L8 term date vs file date | Deferred | Needs a policy choice (compare with BGN03 or a profile cutoff); low risk because `term.dates` is optional in the profile |
+| L9 line-level 277CA STC | Fixed | Ignored |
+| L10 negative age | Fixed | `future` bucket |
+
+Smoke, synthetic data, JVM `-Xmx512m`, measured from outside:
+
+| Case | Time | Peak working set |
+|---|---|---|
+| gen 1,050,000 claims (316 MB: 837 + 835 + 999 + 277) | 2.9 s | 441 MB |
+| remit, two 835 files, 2,025,590 lines, 0 warnings | 5.2 s | 423 MB |
+| recon, all five files, counts equal the generator's | 7.0 s | 640 MB |
+| diff, 1,150,000-member 834 pair (299 MB each), full mode | 11.1 s | 585 MB |
+
+The recon and diff counts equal the generator's expected counts exactly. The 0.1.0 table above holds the 1 KB case; the 1 KB runs are still instant. Packaging: `build/libs/x12diff.jar` and `build/jpackage/x12diff/x12diff.exe` were rebuilt.
+
+Known limits now: the synthetic reversal checks can net negative; PAID/PARTIAL depends on `recon.contractual` matching your payers; an equal-charge duplicate CLM01 can still be matched to the wrong twin (warned).

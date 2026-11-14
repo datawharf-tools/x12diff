@@ -157,7 +157,7 @@ class X12Tests {
             }
             val err = ByteArrayOutputStream()
             assertEquals(2, run(arrayOf("parse", "no-such-file.edi"), PrintStream(ByteArrayOutputStream()), PrintStream(err)))
-            assertTrue(err.toString().startsWith("error: file not found"), err.toString())
+            assertTrue(err.toString().startsWith("error: File not found"), err.toString())
         } finally {
             Files.deleteIfExists(tmp)
         }

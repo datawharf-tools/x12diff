@@ -1,9 +1,11 @@
 package tools.datawharf.x12diff
 
+import java.io.BufferedWriter
+import java.io.IOException
 import java.io.PrintStream
 import java.lang.management.ManagementFactory
 import java.lang.management.MemoryType
-import java.nio.file.Paths
+import java.nio.file.Files
 
 private class Opts(val pos: List<String>, val flags: Map<String, String>)
 
@@ -27,17 +29,99 @@ private fun parseOpts(a: List<String>, withValue: Set<String>, boolean: Set<Stri
     return Opts(pos, flags)
 }
 
-internal fun cmdRemit(a: List<String>, out: PrintStream): Int {
-    val o = parseOpts(a, setOf("--csv", "--rollup", "--profile", "--show"), emptySet())
+private fun showOpt(o: Opts): Int {
+    val v = o.flags["--show"] ?: return 20
+    return v.toIntOrNull()?.takeIf { it >= 0 } ?: throw X12Exception("--show needs a number of 0 or more")
+}
+
+private fun profileOpt(o: Opts): Profile = o.flags["--profile"]?.let { Profile.load(safePath(it)) } ?: Profile.default()
+
+/** Prints envelope problems loudly. Returns true when they must block a normal exit (no --allow-incomplete). */
+private fun envelopeProblems(log: EnvelopeLog, out: PrintStream, err: PrintStream, allow: Boolean): Boolean {
+    if (!log.any) return false
+    val head = "INPUT INCOMPLETE OR INCONSISTENT: ${fmt(log.total.toLong())} envelope problem(s); the numbers in this report may be wrong" + (if (allow) " (accepted by --allow-incomplete)" else "")
+    out.println(head)
+    err.println(head)
+    for (x in log.items.take(10)) { out.println("  ENVELOPE: $x"); err.println("  ENVELOPE: $x") }
+    if (log.total > 10) out.println("  ... ${fmt((log.total - 10).toLong())} more")
+    if (!allow) err.println("error: input is incomplete or inconsistent (for example a truncated transfer); fix the file or rerun with --allow-incomplete to accept it")
+    return !allow
+}
+
+private fun skippedNote(skipped: List<String>, out: PrintStream) {
+    if (skipped.isNotEmpty()) out.println("Skipped (not X12): " + skipped.joinToString(", "))
+}
+
+internal fun cmdDiff(a: List<String>, out: PrintStream, err: PrintStream): Int {
+    val o = parseOpts(a, setOf("--csv", "--profile", "--show", "--mode"), setOf("--stats", "--allow-incomplete"))
+    if (o.pos.size != 2) throw X12Exception("Usage: x12diff diff OLD NEW [--csv out.csv] [--profile p.properties] [--mode full|change]")
+    val showN = showOpt(o)
+    val mode = o.flags["--mode"]?.also { if (it != "full" && it != "change") throw X12Exception("--mode must be full or change") }
+    val profile = profileOpt(o)
+    val oldP = safePath(o.pos[0])
+    val newP = safePath(o.pos[1])
+    if (!Files.isRegularFile(oldP)) throw X12Exception("File not found: ${o.pos[0]}")
+    if (!Files.isRegularFile(newP)) throw X12Exception("File not found: ${o.pos[1]}")
+    val csvPath = o.flags["--csv"]
+
+    val t0 = System.nanoTime()
+    var shown = 0
+    var w: BufferedWriter? = null
+    try {
+        if (csvPath != null) {
+            w = Csv.open(csvPath)
+            w.write(Csv.line(listOf("change_type", "member_key", "segment", "element", "label", "old_value", "new_value", "detail")))
+        }
+        val sum = Differ.diff(oldP, newP, profile, mode) { r ->
+            w?.write(Csv.line(listOf(r.type, r.key, r.segment, r.element, r.label, r.oldValue, r.newValue, r.detail)))
+            if (shown < showN) {
+                shown++
+                val what = if (r.element.isNotEmpty()) "${r.segment} ${r.element}: '${r.oldValue}' -> '${r.newValue}'"
+                else listOf(r.segment, r.detail).filter { it.isNotEmpty() }.joinToString(" ")
+                out.println("  ${r.type.padEnd(10)} ${Csv.fixUtf8(r.key)}  ${Csv.fixUtf8(what)}")
+            }
+        }
+        w?.close()
+        w = null
+        out.println("Old: ${o.pos[0]}  members: ${fmt(sum.oldMembers)}  (BGN08 ${sum.oldBgn}: ${sum.oldKind})")
+        out.println("New: ${o.pos[1]}  members: ${fmt(sum.newMembers)}  (BGN08 ${sum.newBgn}: ${sum.newKind})")
+        out.println("Mode: ${sum.mode}" + if (sum.mode == "change") " (a member missing from the new file is not termed)" else " (a member missing from the new file is termed)")
+        for (n in sum.notes) { out.println(n); if (n.startsWith("WARNING")) err.println(n) }
+        out.println("ADDED:      ${fmt(sum.added)}")
+        out.println("TERMED:     ${fmt(sum.termed)}  (${fmt(sum.termedAbsent)} absent from new, ${fmt(sum.termedFlagged)} newly flagged)")
+        if (sum.mode == "change") out.println("NOT_IN_NEW: ${fmt(sum.absentNotTermed)}  (change files: absent members are unchanged, not terminated)")
+        out.println("CHANGED:    ${fmt(sum.changed)}")
+        out.println("UNCHANGED:  ${fmt(sum.unchanged)}")
+        if (sum.duplicateKeys > 0) out.println("WARNING: ${fmt(sum.duplicateKeys)} duplicate member key(s) in the old file; review your profile key.N lines")
+        if (sum.ambiguousMembers > 0) out.println("WARNING: ${fmt(sum.ambiguousMembers)} member(s) share a key with another member; their rows say 'ambiguous key' and are unreliable")
+        if (sum.emptyKeys > 0) out.println("WARNING: ${fmt(sum.emptyKeys)} member(s) in the old file produced an empty key; review your profile key.N lines")
+        if (csvPath != null) out.println("CSV written: $csvPath")
+        if (o.flags.containsKey("--stats")) {
+            val secs = (System.nanoTime() - t0) / 1e9
+            val peak = ManagementFactory.getMemoryPoolMXBeans().filter { it.type == MemoryType.HEAP }.sumOf { it.peakUsage.used }
+            out.println(String.format("Elapsed: %.1f s   Peak heap (sum of pool peaks): %d MB", secs, peak / (1024 * 1024)))
+        }
+        if (envelopeProblems(sum.envelope, out, err, o.flags.containsKey("--allow-incomplete"))) return 3
+        return if (sum.hasDifferences) 1 else 0
+    } finally {
+        try { w?.close() } catch (_: IOException) {}
+    }
+}
+
+internal fun cmdRemit(a: List<String>, out: PrintStream, err: PrintStream): Int {
+    val o = parseOpts(a, setOf("--csv", "--rollup", "--profile", "--show"), setOf("--allow-incomplete"))
     if (o.pos.isEmpty()) throw X12Exception("Usage: x12diff remit FILE_OR_DIR... [--csv lines.csv] [--rollup adjustments.csv] [--profile p.properties]")
-    val profile = o.flags["--profile"]?.let { Profile.load(Paths.get(it)) } ?: Profile.default()
-    val showN = o.flags["--show"]?.let { it.toIntOrNull() ?: throw X12Exception("--show needs a number") } ?: 20
-    val files = expandInputs(o.pos)
+    val profile = profileOpt(o)
+    val showN = showOpt(o)
+    val skipped = ArrayList<String>()
+    val files = expandInputs(o.pos, skipped)
     val s = RemitCmd.run(files, profile, o.flags["--csv"], o.flags["--rollup"])
+    skippedNote(skipped, out)
     out.println("Files: ${fmt(s.files.toLong())}   835 checks: ${fmt(s.checks)}")
     out.println("Claims: ${fmt(s.claims)}   Service lines: ${fmt(s.lines)}")
     val pct = if (s.charged != 0L) String.format("%.1f%%", s.paid * 100.0 / s.charged) else "n/a"
     out.println("Charged: ${Money.fmt(s.charged)}   Paid: ${Money.fmt(s.paid)}   Paid/charged: $pct   Patient responsibility: ${Money.fmt(s.patientResp)}")
+    if (s.invalidAmounts > 0) out.println("WARNING: ${fmt(s.invalidAmounts)} invalid amount(s) were left out of these totals; the CSV keeps their raw text")
     out.println("Adjustments by group-reason (count, amount):")
     if (s.rollup.isEmpty()) out.println("  (none)")
     for ((k, v) in s.rollup.entries.sortedByDescending { Math.abs(it.value[1]) }.take(30)) {
@@ -50,21 +134,23 @@ internal fun cmdRemit(a: List<String>, out: PrintStream): Int {
     if (s.warningCount > showN) out.println("  ... ${fmt(s.warningCount - showN)} more not shown")
     o.flags["--csv"]?.let { out.println("CSV written: $it") }
     o.flags["--rollup"]?.let { out.println("Rollup written: $it") }
-    return 0
+    return if (envelopeProblems(s.envelope, out, err, o.flags.containsKey("--allow-incomplete"))) 3 else 0
 }
 
-internal fun cmdRecon(a: List<String>, out: PrintStream): Int {
-    val o = parseOpts(a, setOf("--csv", "--profile", "--asof", "--show"), setOf("--stats"))
+internal fun cmdRecon(a: List<String>, out: PrintStream, err: PrintStream): Int {
+    val o = parseOpts(a, setOf("--csv", "--profile", "--asof", "--show"), setOf("--stats", "--allow-incomplete"))
     if (o.pos.isEmpty()) throw X12Exception("Usage: x12diff recon FILE_OR_DIR... [--csv claims.csv] [--profile p.properties] [--asof YYYYMMDD]")
-    val profile = o.flags["--profile"]?.let { Profile.load(Paths.get(it)) } ?: Profile.default()
-    val showN = o.flags["--show"]?.let { it.toIntOrNull() ?: throw X12Exception("--show needs a number") } ?: 20
-    val files = expandInputs(o.pos)
+    val profile = profileOpt(o)
+    val showN = showOpt(o)
+    val skipped = ArrayList<String>()
+    val files = expandInputs(o.pos, skipped)
     val t0 = System.nanoTime()
     val s = ReconCmd.run(files, profile, o.flags["--csv"], o.flags["--asof"] ?: Dates.today(), showN)
+    skippedNote(skipped, out)
     out.println("Files: ${fmt(files.size.toLong())}   837 claims: ${fmt(s.claims)} in ${fmt(s.sets837.toLong())} sets   835 claim entries: ${fmt(s.remitEntries)} on ${fmt(s.remitChecks)} checks")
     out.println("Acknowledgement sets: ${fmt(s.ackSets.toLong())} (${fmt(s.rejectedSets.toLong())} 837 sets rejected)   277CA claim statuses: ${fmt(s.statusEntries277)}")
-    for (k in listOf("PAID", "PARTIAL", "DENIED", "REVERSED", "ADJUSTED", "UNMATCHED", "REJECTED", "ORPHAN")) {
-        out.println("${(k + ":").padEnd(11)}${fmt(s.counts[k] ?: 0L)}")
+    for (k in listOf("PAID", "PARTIAL", "DENIED", "PATIENT_RESP", "REVERSED", "ADJUSTED", "UNMATCHED", "REJECTED", "ORPHAN")) {
+        out.println("${(k + ":").padEnd(14)}${fmt(s.counts[k] ?: 0L)}")
     }
     out.println("Charged (837): ${Money.fmt(s.chargedTotal)}   Paid (matched 835s, net): ${Money.fmt(s.paidTotal)}")
     out.println("UNMATCHED aging (days since claim date): " + s.aging.entries.joinToString("  ") { "${it.key}: ${fmt(it.value)}" })
@@ -72,18 +158,20 @@ internal fun cmdRecon(a: List<String>, out: PrintStream): Int {
         out.println("First ${s.firstRows.size} non-PAID rows:")
         for (r in s.firstRows) {
             out.println(
-                "  ${r[0].padEnd(9)} ${r[1]}  charge ${r[2]}  paid ${r[4]}" +
+                "  ${r[0].padEnd(12)} ${Csv.fixUtf8(r[1])}  charge ${r[2]}  paid ${r[4]}" +
                     (if (r[8].isNotEmpty()) "  ${r[8]}" else "") + (if (r[9].isNotEmpty()) "  ${r[9]}" else "")
             )
         }
     }
     out.println("Warnings: ${fmt(s.warningCount)}")
     for (w in s.warnings.take(showN)) out.println("  WARNING: $w")
+    if (s.warningCount > showN) out.println("  ... ${fmt(s.warningCount - showN)} more not shown")
+    if (s.ambiguousTies > 0) err.println("WARNING: ${fmt(s.ambiguousTies)} acknowledgement or remit match(es) were ambiguous; see the warnings above")
     o.flags["--csv"]?.let { out.println("CSV written: $it") }
-    if ("--stats" in o.flags) {
+    if (o.flags.containsKey("--stats")) {
         val secs = (System.nanoTime() - t0) / 1e9
         val peak = ManagementFactory.getMemoryPoolMXBeans().filter { it.type == MemoryType.HEAP }.sumOf { it.peakUsage.used }
         out.println(String.format("Elapsed: %.1f s   Peak heap (sum of pool peaks): %d MB", secs, peak / (1024 * 1024)))
     }
-    return 0
+    return if (envelopeProblems(s.envelope, out, err, o.flags.containsKey("--allow-incomplete"))) 3 else 0
 }

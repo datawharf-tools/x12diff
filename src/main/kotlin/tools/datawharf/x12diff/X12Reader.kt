@@ -10,7 +10,7 @@ data class Delimiters(val element: Char, val sub: Char, val repetition: Char?, v
 }
 
 /** One segment. [elements] excludes the segment ID; element 01 is index 0. */
-class Segment(val id: String, val elements: List<String>, val offset: Long) {
+class Segment(val id: String, val elements: List<String>, val offset: Long, val sub: Char = ':') {
     fun el(pos: Int): String = if (pos >= 1 && pos <= elements.size) elements[pos - 1] else ""
 
     fun raw(sep: Char): String {
@@ -119,7 +119,7 @@ class X12Reader(
         if (id.isEmpty() || id.length > 3) {
             throw X12Exception("Malformed segment at byte offset $start: missing or invalid segment ID '${id.take(12)}'")
         }
-        return Segment(id, parts.subList(1, parts.size), start)
+        return Segment(id, parts.subList(1, parts.size), start, d.sub)
     }
 
     private fun readIsa(start: Long): Segment {
@@ -156,7 +156,7 @@ class X12Reader(
         val rawRep = raw[82]
         val rep = if (rawRep.isLetterOrDigit() || rawRep == ' ' || rawRep == sep || rawRep == sub) null else rawRep
         delimiters = Delimiters(sep, sub, rep, term)
-        return Segment("ISA", parts.subList(1, parts.size), start)
+        return Segment("ISA", parts.subList(1, parts.size), start, sub)
     }
 
     private fun printable(vararg cs: Int): String =
