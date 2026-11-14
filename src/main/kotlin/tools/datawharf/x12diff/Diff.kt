@@ -30,6 +30,8 @@ class DiffSummary {
     var emptyKeys = 0L
     /** Members whose rows are marked "ambiguous key". */
     var ambiguousMembers = 0L
+    /** TERMED/ADDED pairs that look like one person re-keyed by a name change. */
+    var possibleRenames = 0L
     var mode = "full"
     var oldKind = ""
     var newKind = ""
@@ -153,6 +155,13 @@ object Differ {
         // The new file is scanned next; the mode must be known before absent members are reported, so the
         // BGN08 of the new file is only known afterwards. Absent members are reported after the scan anyway.
         val gone = ArrayList<Pair<String, Entry>>()
+        val addedBuf = ArrayList<Row>()
+        var bufFull = false
+        fun addedRow(r: Row) {
+            if (!bufFull && addedBuf.size < 100_000) { addedBuf.add(r); return }
+            if (!bufFull) { bufFull = true; addedBuf.forEach(sink); addedBuf.clear() }
+            sink(r)
+        }
         var newInfo: ScanInfo? = null
         RandomAccessFile(oldPath.toFile(), "r").use { raf ->
             fun readOld(e: Entry): List<Segment> {
@@ -183,8 +192,15 @@ object Differ {
                 val amb = if (ambiguous) "ambiguous key (duplicate member key); " else ""
                 if (ambiguous) sum.ambiguousMembers++
                 if (e == null) {
-                    sum.added++
-                    sink(Row("ADDED", k, "", "", "", "", "", amb + "not present in old file"))
+                    // A member that exists only in the new file but carries a termination flag is a termination.
+                    val flag = profile.termReason(segs)
+                    if (flag != null) {
+                        sum.termedFlagged++
+                        sink(Row("TERMED", k, "", "", "", "", "", amb + "termination in new file; not in old file ($flag)"))
+                    } else {
+                        sum.added++
+                        addedRow(Row("ADDED", k, "", "", "", "", "", amb + "not present in old file"))
+                    }
                     return@scan
                 }
                 e.seen = true
@@ -244,18 +260,51 @@ object Differ {
         sum.mode = mode
 
         gone.sortBy { it.second.start }
+        val goneRows = ArrayList<Row>()
         for ((k, e) in gone) {
             val amb = if (e.dup) "ambiguous key (duplicate member key); " else ""
             if (e.dup) sum.ambiguousMembers++
             if (mode == "change") {
                 sum.absentNotTermed++
-                sink(Row("NOT_IN_NEW", k, "", "", "", "", "", amb + "not in new file (change file: absence does not mean terminated)"))
+                goneRows.add(Row("NOT_IN_NEW", k, "", "", "", "", "", amb + "not in new file (change file: absence does not mean terminated)"))
             } else {
                 sum.termedAbsent++
-                sink(Row("TERMED", k, "", "", "", "", "", amb + "not present in new file"))
+                goneRows.add(Row("TERMED", k, "", "", "", "", "", amb + "not present in new file"))
             }
         }
+        // Pair one ADDED and one TERMED row with the same subscriber, relationship and birth date: a name change re-keys a dependent.
+        if (mode == "full" && !bufFull) {
+            val addedBySig = HashMap<String, MutableList<Int>>()
+            for ((i, r) in addedBuf.withIndex()) renameSig(r.key)?.let { addedBySig.getOrPut(it) { ArrayList() }.add(i) }
+            val goneBySig = HashMap<String, MutableList<Int>>()
+            for ((i, r) in goneRows.withIndex()) renameSig(r.key)?.let { goneBySig.getOrPut(it) { ArrayList() }.add(i) }
+            for ((sig, ai) in addedBySig) {
+                val gi = goneBySig[sig] ?: continue
+                if (ai.size != 1 || gi.size != 1) continue
+                val a = addedBuf[ai[0]]; val g = goneRows[gi[0]]
+                addedBuf[ai[0]] = Row(a.type, a.key, a.segment, a.element, a.label, a.oldValue, a.newValue, a.detail + "; possible name change (same subscriber, relationship and birth date as TERMED ${g.key})")
+                goneRows[gi[0]] = Row(g.type, g.key, g.segment, g.element, g.label, g.oldValue, g.newValue, g.detail + "; possible name change (same subscriber, relationship and birth date as ADDED ${a.key})")
+                sum.possibleRenames++
+            }
+            if (sum.possibleRenames > 0) {
+                sum.notes.add("WARNING: ${sum.possibleRenames} ADDED/TERMED pair(s) look like a name change (same subscriber, relationship and birth date); " +
+                    "the rows say 'possible name change'. Check them before acting on the terminations.")
+            }
+        } else if (bufFull) {
+            sum.notes.add("Note: more than 100,000 ADDED members; possible name changes were not paired.")
+        }
+        addedBuf.forEach(sink)
+        goneRows.forEach(sink)
         return sum
+    }
+
+    /** subscriber|relationship|birth date from a key built with the default name + birth date fallback, else null. */
+    private fun renameSig(key: String): String? {
+        val p = key.replace(Regex("#\\d+$"), "").split('|')
+        if (p.size < 3 || !p[1].contains('/')) return null
+        val dob = p[1].substringAfterLast('/')
+        if (dob.isEmpty()) return null
+        return p[0] + "|" + p[2] + "|" + dob
     }
 
     private class Keyed(val sig: String, val seg: Segment)

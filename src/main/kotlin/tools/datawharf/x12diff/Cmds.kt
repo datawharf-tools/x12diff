@@ -34,7 +34,11 @@ private fun showOpt(o: Opts): Int {
     return v.toIntOrNull()?.takeIf { it >= 0 } ?: throw X12Exception("--show needs a number of 0 or more")
 }
 
-private fun profileOpt(o: Opts): Profile = o.flags["--profile"]?.let { Profile.load(safePath(it)) } ?: Profile.default()
+private fun profileOpt(o: Opts, out: PrintStream, err: PrintStream): Profile {
+    val p = o.flags["--profile"]?.let { Profile.load(safePath(it)) } ?: Profile.default()
+    for (u in p.unknownKeys) { out.println("WARNING: profile key $u"); err.println("WARNING: profile key $u") }
+    return p
+}
 
 /** Prints envelope problems loudly. Returns true when they must block a normal exit (no --allow-incomplete). */
 private fun envelopeProblems(log: EnvelopeLog, out: PrintStream, err: PrintStream, allow: Boolean): Boolean {
@@ -57,7 +61,7 @@ internal fun cmdDiff(a: List<String>, out: PrintStream, err: PrintStream): Int {
     if (o.pos.size != 2) throw X12Exception("Usage: x12diff diff OLD NEW [--csv out.csv] [--profile p.properties] [--mode full|change]")
     val showN = showOpt(o)
     val mode = o.flags["--mode"]?.also { if (it != "full" && it != "change") throw X12Exception("--mode must be full or change") }
-    val profile = profileOpt(o)
+    val profile = profileOpt(o, out, err)
     val oldP = safePath(o.pos[0])
     val newP = safePath(o.pos[1])
     if (!Files.isRegularFile(oldP)) throw X12Exception("File not found: ${o.pos[0]}")
@@ -111,7 +115,7 @@ internal fun cmdDiff(a: List<String>, out: PrintStream, err: PrintStream): Int {
 internal fun cmdRemit(a: List<String>, out: PrintStream, err: PrintStream): Int {
     val o = parseOpts(a, setOf("--csv", "--rollup", "--profile", "--show"), setOf("--allow-incomplete"))
     if (o.pos.isEmpty()) throw X12Exception("Usage: x12diff remit FILE_OR_DIR... [--csv lines.csv] [--rollup adjustments.csv] [--profile p.properties]")
-    val profile = profileOpt(o)
+    val profile = profileOpt(o, out, err)
     val showN = showOpt(o)
     val skipped = ArrayList<String>()
     val files = expandInputs(o.pos, skipped)
@@ -140,7 +144,7 @@ internal fun cmdRemit(a: List<String>, out: PrintStream, err: PrintStream): Int 
 internal fun cmdRecon(a: List<String>, out: PrintStream, err: PrintStream): Int {
     val o = parseOpts(a, setOf("--csv", "--profile", "--asof", "--show"), setOf("--stats", "--allow-incomplete"))
     if (o.pos.isEmpty()) throw X12Exception("Usage: x12diff recon FILE_OR_DIR... [--csv claims.csv] [--profile p.properties] [--asof YYYYMMDD]")
-    val profile = profileOpt(o)
+    val profile = profileOpt(o, out, err)
     val showN = showOpt(o)
     val skipped = ArrayList<String>()
     val files = expandInputs(o.pos, skipped)

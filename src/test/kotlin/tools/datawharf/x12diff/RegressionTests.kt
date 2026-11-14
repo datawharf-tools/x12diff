@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.nio.file.Files
@@ -18,10 +19,10 @@ private fun isa(ctl: String = "000000001", e: Char = '*', s: Char = ':', r: Char
 
 private fun env(
     vararg sets: S, gsctl: String = "1", isactl: String = "000000001", fid: String = "BE",
-    e: Char = '*', s: Char = ':', r: Char = '^', t: String = "~",
+    e: Char = '*', s: Char = ':', r: Char = '^', t: String = "~", gsdate: String = "20260101", gsver: String = "005010X000",
 ): String {
     val sb = StringBuilder(isa(isactl, e, s, r, t))
-    sb.append(listOf("GS", fid, "SENDER", "RECEIVER", "20260101", "1200", gsctl, "X", "005010X000").joinToString(e.toString())).append(t)
+    sb.append(listOf("GS", fid, "SENDER", "RECEIVER", gsdate, "1200", gsctl, "X", gsver).joinToString(e.toString())).append(t)
     for (st in sets) {
         sb.append(listOf("ST", st.st01, st.st02, st.impl).joinToString(e.toString())).append(t)
         for (g in st.segs) sb.append(g).append(t)
@@ -189,8 +190,8 @@ class RegressionTests {
 
     // ---------- C4 ----------
     private fun monthFiles(d: Path, ackName: String, ack: String): List<Path> {
-        val jan = write(d, "jan.837", env(f837(listOf(Triple("JAN1", "100", "20260105")), bht = "20260105"), isactl = "000000011", fid = "HC"))
-        val feb = write(d, "feb.837", env(f837(listOf(Triple("FEB1", "100", "20260205")), bht = "20260205"), isactl = "000000012", fid = "HC"))
+        val jan = write(d, "jan.837", env(f837(listOf(Triple("JAN1", "100", "20260105")), bht = "20260105"), isactl = "000000011", fid = "HC", gsver = "005010X222A1"))
+        val feb = write(d, "feb.837", env(f837(listOf(Triple("FEB1", "100", "20260205")), bht = "20260205"), isactl = "000000012", fid = "HC", gsver = "005010X222A1"))
         val a = write(d, ackName, env(S("999", "0001", "005010X231A1", listOf("AK1*HC*1*005010X222A1", "AK2*837*0001*005010X222A1", "IK3*CLM*5**8", "IK5*R*5", ack)), gsctl = "7", isactl = "000000013", fid = "FA"))
         return listOf(feb, jan, a)
     }
@@ -437,5 +438,154 @@ class RegressionTests {
         val r = cli("diff", o.toString(), o.toString(), "--csv", d.resolve("nodir").resolve("x.csv").toString())
         assertEquals(2, r.code)
         assertTrue("the folder does not exist" in r.err, r.err)
+    }
+
+    // ================= REVIEW_2 =================
+
+    // ---------- N1 ----------
+    @Test
+    fun n1_newOnlyMemberWithTermFlagIsTermedNotAdded() = inTemp { d ->
+        val w1 = write(d, "w1.834", f834(listOf(member("SUBA", "MA", ins3 = "001")), bgn8 = "2"))
+        val term = listOf("DTP*349*D8*20261231")
+        val w2 = write(d, "w2.834", f834(listOf(member("SUBT", "MT", ins3 = "024", extra = term), member("SUBA", "MA", ins3 = "024", extra = term)), bgn8 = "2"))
+        for (mode in listOf(null, "full")) {
+            val rows = ArrayList<Row>()
+            val s = Differ.diff(w1, w2, Profile.default(), mode) { rows.add(it) }
+            assertEquals(0L, s.added, "mode=$mode")
+            assertEquals(2L, s.termedFlagged, "mode=$mode")
+            val t = rows.single { it.key.startsWith("SUBT") }
+            assertEquals("TERMED", t.type)
+            assertTrue("termination in new file; not in old file" in t.detail, t.detail)
+        }
+        // a plain new member is still ADDED
+        val w3 = write(d, "w3.834", f834(listOf(member("SUBN", "MN", ins3 = "021")), bgn8 = "2"))
+        assertEquals(1L, Differ.diff(w1, w3, Profile.default()) { }.added)
+    }
+
+    // ---------- N2 ----------
+    @Test
+    fun n2_lastNameChangeDoesNotRekeyADependent() = inTemp { d ->
+        val sub = member("SUBF", "MF")
+        val o = write(d, "o.834", f834(listOf(sub, member("SUBF", null, rel = "01", last = "TESTLASTA", first = "SPOUSE", dob = "19850101"))))
+        val n = write(d, "n.834", f834(listOf(sub, member("SUBF", null, rel = "01", last = "TESTLASTB", first = "SPOUSE", dob = "19850101"))))
+        val rows = ArrayList<Row>()
+        val s = Differ.diff(o, n, Profile.default()) { rows.add(it) }
+        assertEquals(0L, s.added); assertEquals(0L, s.termed); assertEquals(1L, s.changed)
+        assertEquals("NM103", rows.single().element)
+        assertEquals("TESTLASTA", rows.single().oldValue)
+    }
+
+    @Test
+    fun n2_firstNameChangePairsTermedAndAddedAsPossibleRename() = inTemp { d ->
+        val sub = member("SUBF", "MF")
+        val o = write(d, "o.834", f834(listOf(sub, member("SUBF", null, rel = "01", first = "SPOUSE", dob = "19850101"))))
+        val n = write(d, "n.834", f834(listOf(sub, member("SUBF", null, rel = "01", first = "SPOUSEN", dob = "19850101"))))
+        val rows = ArrayList<Row>()
+        val s = Differ.diff(o, n, Profile.default()) { rows.add(it) }
+        assertEquals(1L, s.added); assertEquals(1L, s.termedAbsent); assertEquals(1L, s.possibleRenames)
+        assertTrue(rows.all { "possible name change" in it.detail }, rows.map { it.detail }.toString())
+        assertTrue(s.notes.any { it.startsWith("WARNING") && "name change" in it })
+        // a genuinely different person is not paired
+        val n2 = write(d, "n2.834", f834(listOf(sub, member("SUBF", null, rel = "01", first = "OTHER", dob = "19900202"))))
+        assertEquals(0L, Differ.diff(o, n2, Profile.default()) { }.possibleRenames)
+    }
+
+    // ---------- N3 ----------
+    private fun febOnly(d: Path, ackDate: String, ackVer: String = "005010X222A1"): List<Path> {
+        val feb = write(d, "feb.837", env(f837(listOf(Triple("FEB1", "100", "20260205")), bht = "20260205"), isactl = "000000012", fid = "HC", gsdate = "20260205", gsver = "005010X222A1"))
+        val ack = write(d, "jan.999", env(S("999", "0001", "005010X231A1", listOf("AK1*HC*1*$ackVer", "AK2*837*0001*005010X222A1", "IK5*R*5", "AK9*R*1*1*0")),
+            gsctl = "7", isactl = "000000013", fid = "FA", gsdate = ackDate))
+        return listOf(feb, ack)
+    }
+
+    @Test
+    fun n3_ackMustBeOnOrAfterTheClaimSetAndWithinTheWindow() = inTemp { d ->
+        // a January 999 must not reject a February 837 that happens to share GS06 and ST02
+        val before = recon(febOnly(d, "20260110"))
+        assertEquals(null, before.counts["REJECTED"], before.counts.toString())
+        assertEquals(1L, before.counts["UNMATCHED"])
+        assertTrue(before.warnings.any { "nothing was marked" in it }, before.warnings.toString())
+        // on time: marked
+        assertEquals(1L, recon(febOnly(d, "20260210")).counts["REJECTED"])
+        // too late for the default window, fine with a larger one
+        assertEquals(null, recon(febOnly(d, "20260401")).counts["REJECTED"])
+        val wide = Profile.parse("key.1 = REF*0F:02\nrecon.ack.window.days = 90\n", "t")
+        assertEquals(1L, recon(febOnly(d, "20260401"), profile = wide).counts["REJECTED"])
+        // a different version in AK1-03
+        assertEquals(null, recon(febOnly(d, "20260210", ackVer = "005010X999")).counts["REJECTED"])
+        assertThrows<X12Exception> { recon(febOnly(d, "20260210"), profile = Profile.parse("key.1 = REF*0F:02\nrecon.ack.window.days = abc\n", "t")) }
+    }
+
+    @Test
+    fun n3_a277BeforeTheClaimSetIsIgnoredAndFileNameResolutionIsNoted() = inTemp { d ->
+        val c = write(d, "c.837", env(f837(listOf(Triple("RS1", "100", "20260301"))), fid = "HC", gsdate = "20260301"))
+        val early = write(d, "s.277", env(st277("RS1", "A7", "20260110"), fid = "HN", gsdate = "20260110"))
+        val s = recon(listOf(c, early))
+        assertEquals(null, s.counts["REJECTED"]); assertTrue(s.warnings.any { "ignored" in it }, s.warnings.toString())
+        // file-name resolution shows in the detail
+        val files = monthFiles(d.resolve("m").also { Files.createDirectory(it) }, "jan.999", "AK9*R*1*1*0")
+        val csv = d.resolve("o.csv")
+        recon(files, csv = csv)
+        assertTrue("999 matched to this 837 by file name" in Files.readString(csv), Files.readString(csv))
+    }
+
+    // ---------- N4 ----------
+    @Test
+    fun n4_exampleProfileEqualsBuiltInAndUnknownKeysWarn() = inTemp { d ->
+        val ex = Files.readString(Path.of("profiles", "example.properties"), Charsets.UTF_8).replace("\r\n", "\n")
+        assertEquals(Profile.DEFAULT_TEXT.replace("\r\n", "\n"), ex)
+        assertTrue(Profile.default().unknownKeys.isEmpty(), Profile.default().unknownKeys.toString())
+        val p = Profile.parse("key.1 = REF*0F:02\nrecon.paid.min.ratio = 1.0\nbogus.key = 1\nlabel.INS:03 = x\nadjlabel.CO-45 = y\n", "t")
+        assertEquals(2, p.unknownKeys.size)
+        assertTrue(p.unknownKeys.any { "recon.paid.min.ratio was removed in 0.2.1" in it })
+        val f = write(d, "p.properties", "key.1 = REF*0F:02\nrecon.paid.min.ratio = 1.0\n")
+        val o = write(d, "o.834", f834(listOf(member("SUBA", "MA"))))
+        val r = cli("diff", o.toString(), o.toString(), "--profile", f.toString())
+        assertTrue("WARNING: profile key recon.paid.min.ratio" in r.out && "WARNING: profile key" in r.err, r.out + r.err)
+    }
+
+    // ---------- N5 / N6 ----------
+    @Test
+    fun n5_zeroPaidWithADenialAdjustmentIsDeniedNotPatientResp() = inTemp { d ->
+        val c = write(d, "c.837", env(f837(listOf(Triple("D1", "150", "20260101"), Triple("D2", "150", "20260101"))), fid = "HC"))
+        val r = write(d, "r.835", env(f835(listOf(
+            "CLP*D1*1*150*0*50*12", "CAS*PR*1*50", "CAS*CO*50*100",
+            "CLP*D2*1*150*0*150*12", "CAS*PR*1*150"), "0"), fid = "HP"))
+        val s = recon(listOf(c, r))
+        assertEquals(1L, s.counts["DENIED"]); assertEquals(1L, s.counts["PATIENT_RESP"])
+    }
+
+    @Test
+    fun n6_sequestrationIsContractualByDefault() = inTemp { d ->
+        val c = write(d, "c.837", env(f837(listOf(Triple("M1", "100", "20260101"))), fid = "HC"))
+        val r = write(d, "r.835", env(f835(listOf("CLP*M1*1*100*78.40*0*12", "CAS*CO*45*20**253*1.60"), "78.40"), fid = "HP"))
+        assertEquals(1L, recon(listOf(c, r)).counts["PAID"])
+        val only45 = Profile.parse("key.1 = REF*0F:02\nrecon.contractual = CO-45\n", "t")
+        assertEquals(1L, recon(listOf(c, r), profile = only45).counts["PARTIAL"])
+        assertTrue(Profile.DEFAULT_TEXT.contains("recon.contractual = CO-45, CO-253"))
+    }
+
+    // ---------- N7 / N8 / N9 / N10 ----------
+    @Test
+    fun n8_emptyFileWarnsAndExitsThree() = inTemp { d ->
+        val e = write(d, "empty.834", "")
+        val r = cli("parse", e.toString())
+        assertEquals(3, r.code, r.out + r.err)
+        assertTrue("empty or contains no X12 segments" in r.out, r.out)
+        assertEquals(0, cli("parse", e.toString(), "--allow-incomplete").code)
+        assertEquals(0, cli("parse", write(d, "ok.834", f834(listOf(member("SUBA", "MA")))).toString()).code)
+    }
+
+    @Test
+    fun n9n10_duplicateRowsSayHowTheyWereMatchedAndReadmeDocumentsBom() = inTemp { d ->
+        val c = write(d, "c.837", env(f837(listOf(Triple("DUP1", "100", "20260101"), Triple("DUP1", "200", "20260102"))), fid = "HC"))
+        val r = write(d, "r.835", env(f835(listOf("CLP*DUP1*1*200*200*0*12*X1"), "200"), fid = "HP"))
+        val csv = d.resolve("o.csv")
+        recon(listOf(c, r), csv = csv)
+        assertTrue("duplicate CLM01; remit matched by charge" in Files.readString(csv), Files.readString(csv))
+        val readme = Files.readString(Path.of("README.md"), Charsets.UTF_8)
+        assertTrue("byte-order mark" in readme && "BOM" in readme)
+        assertTrue("Mode: full" in readme && "(BGN08 4: full)" in readme)   // N7: the 834 example shows the current console format
+        assertTrue("future end date also counts" in readme)
     }
 }

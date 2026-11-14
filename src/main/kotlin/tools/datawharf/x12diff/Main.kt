@@ -6,13 +6,13 @@ import java.nio.file.Files
 import java.nio.file.NoSuchFileException
 import kotlin.system.exitProcess
 
-const val VERSION = "0.2.1"
+const val VERSION = "0.2.2"
 
 private val USAGE = """
 x12diff $VERSION - offline X12 inspector, 834 member diff, 835 remit and claim reconciliation (Datawharf Tools)
 
 Usage:
-  x12diff parse FILE
+  x12diff parse FILE [--allow-incomplete]
   x12diff diff OLD NEW [--csv out.csv] [--profile p.properties] [--mode full|change] [--show N] [--stats] [--allow-incomplete]
   x12diff remit FILE_OR_DIR... [--csv lines.csv] [--rollup adjustments.csv] [--profile p.properties] [--show N] [--allow-incomplete]
   x12diff recon FILE_OR_DIR... [--csv claims.csv] [--profile p.properties] [--asof YYYYMMDD] [--show N] [--stats] [--allow-incomplete]
@@ -73,8 +73,10 @@ fun run(args: Array<String>, out: PrintStream, err: PrintStream): Int {
     }
 }
 
-private fun cmdParse(a: List<String>, out: PrintStream): Int {
-    if (a.size != 1 || a[0].startsWith("--")) throw X12Exception("Usage: x12diff parse FILE")
+private fun cmdParse(a0: List<String>, out: PrintStream): Int {
+    val allow = "--allow-incomplete" in a0
+    val a = a0.filter { it != "--allow-incomplete" }
+    if (a.size != 1 || a[0].startsWith("--")) throw X12Exception("Usage: x12diff parse FILE [--allow-incomplete]")
     val path = safePath(a[0])
     if (Files.isDirectory(path)) throw X12Exception("'${a[0]}' is a folder; parse takes one file (remit and recon accept folders)")
     if (!Files.isRegularFile(path)) throw X12Exception("File not found: ${a[0]}")
@@ -91,6 +93,7 @@ private fun cmdParse(a: List<String>, out: PrintStream): Int {
         }
     }
     checker.finish()
+    if (segs == 0L) checker.warnings.add("The file is empty or contains no X12 segments")
     out.println("File: ${path.fileName} (${fmt(Files.size(path))} bytes)")
     for ((i, d) in delims.withIndex()) {
         out.println(
@@ -109,7 +112,8 @@ private fun cmdParse(a: List<String>, out: PrintStream): Int {
     out.println("Warnings: ${w.size + checker.suppressed}")
     for (x in w) out.println("  WARNING: $x")
     if (checker.suppressed > 0) out.println("  ... and ${fmt(checker.suppressed.toLong())} more not shown")
-    return 0
+    // Like diff, remit and recon: an empty, truncated or inconsistent file exits with 3 unless --allow-incomplete is given.
+    return if ((w.isNotEmpty() || checker.suppressed > 0) && !allow) 3 else 0
 }
 
 private fun cmdGen(a: List<String>, out: PrintStream): Int {

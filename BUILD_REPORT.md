@@ -1,4 +1,4 @@
-# x12diff 0.2.1 build report (0.1.0 and 0.2.0 sections kept below)
+# x12diff 0.2.2 build report (0.1.0, 0.2.0 and 0.2.1 sections kept below)
 
 Built 2026-11-14 on Windows 11, Temurin JDK 21.0.11, Gradle 9.4.1, Kotlin 2.2.21. Runtime dependencies: none (Kotlin stdlib only).
 
@@ -103,3 +103,25 @@ Smoke, synthetic data, JVM `-Xmx512m`, measured from outside:
 The recon and diff counts equal the generator's expected counts exactly. The 0.1.0 table above holds the 1 KB case; the 1 KB runs are still instant. Packaging: `build/libs/x12diff.jar` and `build/jpackage/x12diff/x12diff.exe` were rebuilt.
 
 Known limits now: the synthetic reversal checks can net negative; PAID/PARTIAL depends on `recon.contractual` matching your payers; an equal-charge duplicate CLM01 can still be matched to the wrong twin (warned).
+
+## 0.2.2: fixes from REVIEW_2.md
+
+62 unit tests, all passing (52 earlier + 10 new, one or more per finding).
+
+| Finding | Status | Fix |
+|---|---|---|
+| N1 CRITICAL, new-only terminated member shown as ADDED | Fixed | A member that exists only in the new file and carries the term flag is TERMED (`termination in new file; not in old file`) in both modes |
+| N2 HIGH, last name re-keys a dependent | Fixed | Default fallback key is first name + birth date (no last name), so a last-name change is a CHANGED row. If a first name changes, the ADDED and TERMED rows with the same subscriber, relationship and birth date are marked `possible name change` and a warning is printed (pairing buffers up to 100,000 ADDED rows) |
+| N3 HIGH, 999 applied without a date check, README overclaim | Fixed | 999/997 and 277CA must be dated on or after the 837 (GS04, or BHT04) and within `recon.ack.window.days` (default 30), and the AK1-03 version must match GS08; otherwise nothing is marked and a warning says so. The row detail says when a file name resolved a match. README wording softened |
+| N4 MEDIUM, stale example profile, silent unknown keys | Fixed | `profiles/example.properties` regenerated from the built-in text; a test keeps them identical; unknown keys (including the removed `recon.paid.min.ratio`) print a warning |
+| N5 MEDIUM, PATIENT_RESP hid denials | Fixed | PATIENT_RESP only when nothing but PR was adjusted; any other adjustment with zero paid is DENIED; documented |
+| N6 MEDIUM, routine Medicare PARTIAL | Fixed | Default `recon.contractual = CO-45, CO-253`; README says how to extend it |
+| N7 README 834 example | Fixed | Replaced with a real run's output; a test checks that it shows the current format |
+| N8 empty file | Fixed | `parse` warns and exits 3 (also for other envelope problems); `--allow-incomplete` returns 0 |
+| N9 BOM | Documented | README explains the BOM and how to read it |
+| N10 duplicate-CLM01 detail | Fixed | Detail says how the remit was matched (charge, payer control number, payment state and order, claim ID only, or ambiguous) |
+| N11 double notice | By design, documented | stdout and stderr both carry the notice so redirecting either keeps it |
+
+The reviewer's note on the global git identity: `~/.gitconfig` is not touched by this project; the repo-local identity is Datawharf Tools.
+
+Smoke on the 316 MB synthetic claims set and the 299 MB 834 pair, `-Xmx512m`: recon 7.1 s, 631 MB peak working set, counts equal the generator's; 834 diff 7.9 s, 591 MB. Packaging: the jar and `build/jpackage/x12diff/x12diff.exe` (reports 0.2.2) were rebuilt.

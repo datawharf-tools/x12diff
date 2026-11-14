@@ -7,6 +7,7 @@ import java.util.TreeMap
 
 private class SetRef(
     val id: Int, val fileIdx: Int, val isa13: String, val gs02: String, val gs03: String, val gs06: String, val st02: String,
+    val gsDate: Long?, val gs08: String,
 ) {
     val group: String get() = "$fileIdx|$isa13|$gs06"
 }
@@ -26,6 +27,8 @@ private class ReconClaim(val id: String, val charge: Long, val date: Int, val se
     var reject277: String? = null
     var s277Date = Int.MIN_VALUE
     var dup = false
+    var matchHow: String? = null
+    var tieNote: String? = null
 }
 
 private class Orphan(val id: String, val charge: Long, val paid: Long, val patientResp: Long, val status: String, val where: String)
@@ -67,13 +70,16 @@ object ReconCmd {
 
         val reversal = profile.list("recon.reversal.codes", listOf("22")).toSet()
         val deniedCodes = profile.list("recon.denied.codes", listOf("4")).toSet()
-        val contractual = profile.list("recon.contractual", listOf("CO-45")).toSet()
+        val contractual = profile.list("recon.contractual", listOf("CO-45", "CO-253")).toSet()
         val dateLocs = profile.list("recon.claim.date", listOf("DTP*472:03", "DTP*434:03")).map { Locator.parse(it, "recon.claim.date") }
         val dateFallback = Locator.parse(profile.value("recon.claim.date.fallback", "BHT:04"), "recon.claim.date.fallback")
         val ackReject = profile.list("recon.ack.reject.codes", listOf("R", "M", "W", "X")).toSet()
         val statusReject = profile.list("recon.status.reject.categories", listOf("A3", "A4", "A6", "A7", "A8")).toSet()
         val statusAccept = profile.list("recon.status.accept.categories", listOf("A0", "A1", "A2")).toSet()
         val stems = files.map { stem(it) }
+        val windowDays = profile.value("recon.ack.window.days", "30").toLongOrNull()?.takeIf { it >= 0 }
+            ?: throw X12Exception("Profile: recon.ack.window.days must be a number of 0 or more")
+        val setNotes = HashMap<Int, String>()
 
         val all = ArrayList<ReconClaim>()
         val byId = HashMap<String, ReconClaim>(1 shl 16)
@@ -96,7 +102,8 @@ object ReconCmd {
 
             override fun begin(type: String, st: Segment, gs: Segment?, d: Delimiters, file: String) {
                 setId = sets.size
-                val ref = SetRef(setId, fileIdx, isa13 = curIsa, gs02 = gs?.el(2) ?: "", gs03 = gs?.el(3) ?: "", gs06 = gs?.el(6) ?: "", st02 = st.el(2))
+                val ref = SetRef(setId, fileIdx, isa13 = curIsa, gs02 = gs?.el(2) ?: "", gs03 = gs?.el(3) ?: "", gs06 = gs?.el(6) ?: "", st02 = st.el(2),
+                    gsDate = Dates.days(gs?.el(4) ?: ""), gs08 = gs?.el(8) ?: "")
                 sets.add(ref)
                 byGsSt.getOrPut("${ref.gs06}|${ref.st02}") { ArrayList() }.add(ref)
                 byGs.getOrPut(ref.gs06) { ArrayList() }.add(ref)
@@ -166,21 +173,24 @@ object ReconCmd {
             val isRev = c.status in reversal || c.charge < 0
             val abs = Math.abs(c.charge)
             var cand = list.filter { it.charge == abs }
-            if (cand.isEmpty()) cand = list
+            var how = "charge"
+            if (cand.isEmpty()) { cand = list; how = "claim ID only" }
             if (cand.size > 1 && c.payerCtl.isNotEmpty()) {
                 val b = cand.filter { it.ctl == c.payerCtl }
-                if (b.isNotEmpty()) cand = b
+                if (b.isNotEmpty() && b.size < cand.size) { cand = b; how = "payer control number" }
             }
             if (cand.size > 1) {
                 val pref = if (isRev) cand.filter { it.paid > 0 }
                 else cand.filter { it.reversal && it.paid <= 0 }.ifEmpty { cand.filter { it.remitEntries == 0 } }
-                if (pref.isNotEmpty()) cand = pref
+                if (pref.isNotEmpty() && pref.size < cand.size) { cand = pref; how = "payment state and order" }
             }
             if (cand.size > 1) {
+                how = "first candidate (ambiguous)"
                 sum.ambiguousTies++
                 addWarn("remit entry for duplicated CLM01 '${c.id}' (${c.check.label}) could not be matched to one claim; applied to the first candidate")
             }
             val chosen = cand[0]
+            chosen.matchHow = how
             if (c.payerCtl.isNotEmpty() && chosen.ctl == null) chosen.ctl = c.payerCtl
             return chosen
         }
@@ -214,7 +224,7 @@ object ReconCmd {
         fun markSet(s: SetRef) { rejected.set(s.id) }
 
         /** Narrows candidate sets by the (mirrored or same) sender/receiver pair, then by file name. */
-        fun narrow(cands: List<SetRef>, gs02: String, gs03: String, fileStem: String): List<SetRef> {
+        fun narrow(cands: List<SetRef>, gs02: String, gs03: String, fileStem: String, usedStem: BooleanArray): List<SetRef> {
             var c = cands
             if (c.map { it.group }.distinct().size > 1) {
                 val m = c.filter { (it.gs02 == gs03 && it.gs03 == gs02) || (it.gs02 == gs02 && it.gs03 == gs03) }
@@ -222,7 +232,7 @@ object ReconCmd {
             }
             if (c.map { it.group }.distinct().size > 1) {
                 val f = c.filter { stems[it.fileIdx] == fileStem }
-                if (f.isNotEmpty() && f.size < c.size) c = f
+                if (f.isNotEmpty() && f.size < c.size) { c = f; usedStem[0] = true }
             }
             return c
         }
@@ -235,10 +245,12 @@ object ReconCmd {
             var gs03 = ""
             var fileStem = ""
             var fname = ""
+            var ackDate = ""
+            var ackVer = ""
 
             override fun begin(type: String, st: Segment, gs: Segment?, d: Delimiters, file: String) {
-                this.gs = ""; this.st = ""; sum.ackSets++
-                gs02 = gs?.el(2) ?: ""; gs03 = gs?.el(3) ?: ""; fname = file
+                this.gs = ""; this.st = ""; sum.ackSets++; ackVer = ""
+                gs02 = gs?.el(2) ?: ""; gs03 = gs?.el(3) ?: ""; fname = file; ackDate = gs?.el(4) ?: ""
                 fileStem = file.substringBeforeLast('.').lowercase()
             }
 
@@ -247,7 +259,21 @@ object ReconCmd {
                     addWarn("$fname: $what refers to an 837 set that is not in the input files; nothing was marked")
                     return
                 }
-                val c = narrow(cands, gs02, gs03, fileStem)
+                // The acknowledgement must be dated on or after the 837 and within the window, and name the same version.
+                val ackDays = Dates.days(ackDate)
+                val timely = cands.filter { sr ->
+                    val okDate = ackDays == null || sr.gsDate == null || (ackDays - sr.gsDate in 0..windowDays)
+                    val okVer = ackVer.isEmpty() || sr.gs08.isEmpty() || ackVer == sr.gs08
+                    okDate && okVer
+                }
+                if (timely.isEmpty()) {
+                    sum.ambiguousTies++
+                    addWarn("$fname: $what matches ${cands.size} 837 set(s), but the acknowledgement date $ackDate is not on or after the 837 date and within ${windowDays} days (or the version differs); nothing was marked. " +
+                        "If the 999 really belongs to this 837, raise recon.ack.window.days in the profile")
+                    return
+                }
+                val usedStem = BooleanArray(1)
+                val c = narrow(timely, gs02, gs03, fileStem, usedStem)
                 if (c.map { it.group }.distinct().size > 1) {
                     sum.ambiguousTies++
                     addWarn("$fname: $what matches ${c.map { it.group }.distinct().size} different 837 groups (same GS06/ST02 in several files); no claim was marked rejected. " +
@@ -255,11 +281,12 @@ object ReconCmd {
                     return
                 }
                 if (wholeGroup) c.forEach { markSet(it) } else markSet(c.first())
+                if (usedStem[0]) c.forEach { setNotes[it.id] = "999 matched to this 837 by file name" }
             }
 
             override fun segment(s: Segment) {
                 when (s.id) {
-                    "AK1" -> gs = s.el(2)
+                    "AK1" -> { gs = s.el(2); ackVer = s.el(3) }
                     "AK2" -> st = s.el(2)
                     "IK5", "AK5" -> if (s.el(1) in ackReject) {
                         val c = if (gs.isEmpty()) sets.filter { it.st02 == st } else byGsSt["$gs|$st"] ?: emptyList()
@@ -277,13 +304,17 @@ object ReconCmd {
             var inLine = false
             var fname = ""
             var fileStem = ""
+            var gsDate = ""
+            var bhtDate = ""
 
             override fun begin(type: String, st: Segment, gs: Segment?, d: Delimiters, file: String) {
                 this.d = d; claimId = ""; inLine = false; fname = file; fileStem = file.substringBeforeLast('.').lowercase()
+                gsDate = gs?.el(4) ?: ""; bhtDate = ""
             }
 
             override fun segment(s: Segment) {
                 when (s.id) {
+                    "BHT" -> bhtDate = s.el(4)
                     "HL" -> { claimId = ""; inLine = false }
                     "TRN" -> { inLine = false; if (s.el(1) == "2") claimId = s.el(2) }
                     "SVC" -> inLine = true
@@ -292,13 +323,24 @@ object ReconCmd {
                         val head = byId[claimId]
                         if (head == null) { addWarn("$fname: 277CA status for claim '$claimId' which is not in the 837 input"); return }
                         var cands = chain(head)
+                        val statusDays = Dates.days(bhtDate.ifEmpty { gsDate })
+                        val timely = cands.filter { cl ->
+                            val sd = sets[cl.setId].gsDate
+                            statusDays == null || sd == null || (statusDays - sd in 0..windowDays)
+                        }
+                        if (timely.isEmpty()) {
+                            sum.ambiguousTies++
+                            addWarn("$fname: 277CA status for claim '$claimId' is not dated on or after its 837 and within $windowDays days; it was ignored. Raise recon.ack.window.days if it belongs to this claim")
+                            return
+                        }
+                        cands = timely
                         if (cands.size > 1) {
                             val amt = Money.parse(s.el(4))
                             if (amt != null) { val m = cands.filter { it.charge == amt }; if (m.isNotEmpty()) cands = m }
                         }
                         if (cands.size > 1) {
                             val f = cands.filter { stems[it.fileIdx] == fileStem }
-                            if (f.isNotEmpty()) cands = f
+                            if (f.isNotEmpty() && f.size < cands.size) { cands = f; cands[0].tieNote = "277CA matched to this claim by file name" }
                         }
                         if (cands.size > 1) {
                             sum.ambiguousTies++
@@ -346,7 +388,9 @@ object ReconCmd {
                 val status: String
                 var source = ""
                 val notes = ArrayList<String>()
-                if (c.dup) notes.add("duplicate CLM01")
+                if (c.dup) notes.add("duplicate CLM01" + (c.matchHow?.let { "; remit matched by $it" } ?: ""))
+                c.tieNote?.let { notes.add(it) }
+                setNotes[c.setId]?.let { if (rejected.get(c.setId)) notes.add(it) }
                 if (c.remitEntries == 0) {
                     status = if (ackRej || c.reject277 != null) "REJECTED" else "UNMATCHED"
                     if (ackRej) source = "999 set rejected"
@@ -355,7 +399,7 @@ object ReconCmd {
                     status = when {
                         c.reversal -> if (c.paid > 0) "ADJUSTED" else "REVERSED"
                         c.paid < 0 -> "REVERSED"
-                        c.paid == 0L -> if (c.deniedStatus || c.patientResp <= 0L) "DENIED" else "PATIENT_RESP"
+                        c.paid == 0L -> if (c.deniedStatus || c.patientResp <= 0L || c.otherAdj != 0L) "DENIED" else "PATIENT_RESP"
                         c.otherAdj != 0L -> "PARTIAL"
                         !c.anyAdj && c.paid + c.patientResp < c.charge -> "PARTIAL"
                         else -> "PAID"

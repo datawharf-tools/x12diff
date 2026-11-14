@@ -42,6 +42,7 @@ class Profile(
     val ignore: List<Locator>,
     val labels: Map<String, String>,
     val raw: Map<String, String> = emptyMap(),
+    val unknownKeys: List<String> = emptyList(),
 ) {
     fun list(name: String, default: List<String>): List<String> =
         if (raw.containsKey(name)) raw[name]!!.split(',').map { it.trim() }.filter { it.isNotEmpty() } else default
@@ -143,8 +144,9 @@ member.start = INS
 # Member key: key parts are joined with '|'. Each part lists alternatives separated by '|';
 # the first alternative with a value is used. Several locators joined by '+' are combined.
 key.1 = REF*0F:02
-# key.2: the member id if present, otherwise last name + first name + birth date joined with '+'.
-key.2 = NM1*IL:09 | NM1*IL:03 + NM1*IL:04 + DMG:02
+# key.2: the member id if present, otherwise first name + birth date joined with '+'. The last name is left out
+# on purpose, so a name change does not turn a dependent into a TERMED plus an ADDED.
+key.2 = NM1*IL:09 | NM1*IL:04 + DMG:02
 key.3 = INS:02
 
 # File mode, read from BGN08 of each 834: values in mode.full.codes mean the file lists everyone (so a member
@@ -182,8 +184,9 @@ recon.reversal.codes = 22
 recon.denied.codes = 4
 # Zero paid with patient responsibility and no denial status is PATIENT_RESP, not DENIED.
 # Adjustments (GROUP-REASON) that are the normal contractual write-off. A paid claim is PAID when the only
-# adjustments are these and patient responsibility (PR); any other adjustment makes it PARTIAL.
-recon.contractual = CO-45
+# adjustments are these and patient responsibility (PR); any other adjustment makes it PARTIAL. Add the codes your
+# payers use for routine write-offs, for example: recon.contractual = CO-45, CO-253, CO-42, PI-45
+recon.contractual = CO-45, CO-253
 # Claim date in the 837: the first match inside the claim for each locator, in this order, then the fallback
 # (a segment seen before the first claim of the set).
 recon.claim.date = DTP*472:03, DTP*434:03
@@ -194,9 +197,28 @@ recon.ack.reject.codes = R, M, W, X
 # earlier rejection when they arrive later.
 recon.status.reject.categories = A3, A4, A6, A7, A8
 recon.status.accept.categories = A0, A1, A2
+# A 999/997 or 277CA only counts for an 837 set when its date (GS04, or BHT04 for a 277CA) is on or after the
+# 837's and within this many days. Otherwise nothing is marked and a warning is printed.
+recon.ack.window.days = 30
 # Optional labels for the adjustment rollup, written as adjlabel.GROUP-REASON
 # adjlabel.CO-45 = your label here
 """
+
+        private val KNOWN = setOf(
+            "member.start", "term.code", "term.codes", "term.dates", "align", "ignore", "mode.full.codes", "mode.change.codes",
+            "recon.reversal.codes", "recon.denied.codes", "recon.contractual", "recon.claim.date", "recon.claim.date.fallback",
+            "recon.ack.reject.codes", "recon.status.reject.categories", "recon.status.accept.categories", "recon.ack.window.days",
+        )
+
+        private fun unknownOf(map: Map<String, String>, source: String): List<String> {
+            val out = ArrayList<String>()
+            for (k in map.keys) {
+                if (k in KNOWN || k.startsWith("key.") || k.startsWith("label.") || k.startsWith("adjlabel.")) continue
+                out.add(if (k == "recon.paid.min.ratio") "$k was removed in 0.2.1 and is ignored (PAID/PARTIAL now follows recon.contractual)"
+                        else "$k is not a key x12diff knows and is ignored")
+            }
+            return out
+        }
 
         fun default(): Profile = parse(DEFAULT_TEXT, "built-in default")
 
@@ -244,7 +266,7 @@ recon.status.accept.categories = A0, A1, A2
             }
             val start = map["member.start"]?.trim().orEmpty().ifEmpty { "INS" }
             if (start.length > 3) throw X12Exception("Profile $source: bad member.start '$start'")
-            return Profile(start, keyParts, list(map["term.codes"]).toSet(), termCode, termDates, align, ignore, labels, map)
+            return Profile(start, keyParts, list(map["term.codes"]).toSet(), termCode, termDates, align, ignore, labels, map, unknownOf(map, source))
         }
     }
 }
