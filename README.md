@@ -1,16 +1,47 @@
-# x12diff
+# x12diff: compare, flatten and reconcile X12 healthcare files offline
 
-A free command-line tool for healthcare X12 files, from Datawharf Tools.
+**A free command-line tool to compare two 834 enrollment files, convert 835 remittances to CSV files that open in Excel, reconcile 837 claims against 835 payments, and trace 999 / 277CA rejections back to the claim.** It runs on your PC, makes no network connections, and handles files of several hundred megabytes without opening them in a spreadsheet.
 
-- `x12diff parse FILE` summarizes a file: interchanges, functional groups, transaction sets by type (834, 837, 835, 999, 277CA, TA1 and so on), segment counts, and envelope control-number mismatches as warnings.
-- `x12diff diff OLD NEW` compares two 834 member files and reports who was ADDED, TERMED, CHANGED (field by field: segment, element, old value, new value) and how many are UNCHANGED. It reads BGN08 to tell full files from change files (see "How the diff works"). It writes a CSV with one row per change.
-- `x12diff remit FILES...` flattens 835 remittances to one CSV row per service line, rolls up adjustments by group and reason code, and checks that each claim and each check balances.
-- `x12diff recon FILES...` matches 837 claims to 835 payments and tells you which claims are PAID, PARTIAL, DENIED, PATIENT_RESP, REVERSED, ADJUSTED, UNMATCHED (no remit yet, with aging), REJECTED before adjudication (999 or 277CA), or ORPHAN remits with no claim.
+By Datawharf Tools. MIT license. Windows app image or any Java 17+.
+
+Page and Pro waitlist: https://datawharftools.com/x12/
+
+## What do you need to do?
+
+| I want to... | Command |
+|---|---|
+| See what is in an X12 file (interchanges, transaction types, envelope errors) | `x12diff parse FILE` |
+| **Compare two 834 files**: who was added, termed or changed between last month and this month | `x12diff diff OLD NEW --csv changes.csv` |
+| **Convert an 835 to CSV for Excel**: one row per service line, adjustments by reason code, balance checks | `x12diff remit FILES --csv lines.csv --rollup adjustments.csv` |
+| **Reconcile 837 claims to 835 payments**: paid, partial, denied, reversed, unmatched with aging, orphan payments | `x12diff recon claims.837 remits.835 --csv recon.csv` |
+| **Find why a claim never got paid: 999 and 277CA rejections** traced back to the 837 claim | `x12diff recon` with the 837, 835, 999 and 277 files |
+| Try everything on fake data first | `x12diff gen ...` |
+
+## Why use it
+
 - It streams. Memory depends on the number of members (diff) or claims (recon), not on file size. Two synthetic 300 MB 834 files diff in about 8 seconds, and a synthetic 295 MB 837/835/999/277 set reconciles in about 6 seconds with a 512 MB heap.
+- **Privacy: x12diff runs entirely on your machine and makes no network connections.** It has no telemetry, no update check and no network code. It reads the files you name and writes the CSV you ask for.
+- It checks envelopes (SE, GE, IEA, control numbers) and refuses to give you a quiet wrong answer from a cut-off file: it exits with code 3 and a loud notice.
+- It ships no implementation-guide text. You set member keys, termination codes and labels in a plain-text profile that matches your trading partner.
 
-**Privacy: x12diff runs entirely on your machine and makes no network connections.** It has no telemetry, no update check and no network code. It reads the files you name and writes the CSV you ask for.
+## Quick start (3 commands)
 
-## Quick start
+You need Java 17 or newer (download `x12diff.jar` from the Releases page), or use the Windows app image (`x12diff.exe`, runtime bundled).
+
+```
+java -jar x12diff.jar gen --members 300 --old old.834 --new new.834 --seed 3
+java -jar x12diff.jar diff old.834 new.834 --csv changes.csv
+java -jar x12diff.jar parse new.834
+```
+
+The first command writes a fake old/new pair (no real data is ever used). The second compares them and writes `changes.csv`; it exits with code 1 when it finds differences, which is expected (see exit codes below). The third summarizes a file. Replace the fake files with your own to use it for real. For 835 and 837 files, generate a synthetic set with `x12diff gen --kind claims --claims 200 --dir demo --seed 4`, then:
+
+```
+java -jar x12diff.jar remit demo/remits_1.835 demo/remits_2.835 --csv lines.csv
+java -jar x12diff.jar recon demo --csv recon.csv
+```
+
+## Running it: options and exit codes
 
 You need Java 17 or newer (the jar is built for Java 17 and also runs on 21), or use the Windows app image (`x12diff.exe`, runtime bundled).
 
@@ -179,16 +210,22 @@ CSV files are written as UTF-8 with a byte-order mark (BOM), so Excel shows acce
 ./gradlew appImage          # build/jpackage/x12diff/x12diff.exe (needs a JDK with jpackage)
 ```
 
-## Pro (coming)
+## Pro (planned, not released)
 
-The command-line tool stays fully free: parse, diff, remit and recon, including the 999/277CA tracer. Pro ($99 a year) is for people who do not want a command line:
+The command-line tool stays fully free and MIT licensed: parse, diff, remit and recon, including the 999/277CA tracer. Pro ($99 a year) is a planned desktop app for people who do not want a command line:
 
 - Desktop app (no command line)
 - Excel workbook reports
 - Saved per-trading-partner profiles
 - Folder watching
 
-Details and waitlist: https://datawharftools.com/x12
+Pro is pre-order and waitlist only. Details: https://datawharftools.com/x12/
+
+## Related reading
+
+- [Diffing two 834 files without crashing Excel](https://dev.to/datawharf-tools/diffing-two-834-files-without-crashing-excel-275n)
+- [Why was this 837 rejected? Tracing 999 and 277CA responses back to the claim](https://dev.to/datawharf-tools/why-was-this-837-rejected-tracing-999-and-277ca-responses-back-to-the-claim-1ehk)
+- [Flatten an 835 remittance to CSV, then reconcile it against your 837 claims](https://dev.to/datawharf-tools/flatten-an-835-remittance-to-csv-then-reconcile-it-against-your-837-claims-169b)
 
 Questions or bug reports with synthetic repro files: hello@datawharftools.com. Please never send real member or claim data.
 
