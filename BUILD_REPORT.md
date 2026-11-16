@@ -1,5 +1,7 @@
 # x12diff 0.2.3 build report (earlier sections kept below)
 
+**Current state: 68 unit tests, all passing** (see the last section). The sections below are kept in the order they were written.
+
 Built 2026-11-14 on Windows 11, Temurin JDK 21.0.11, Gradle 9.4.1, Kotlin 2.2.21. Runtime dependencies: none (Kotlin stdlib only).
 
 ## Tests

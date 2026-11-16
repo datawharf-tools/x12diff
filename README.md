@@ -26,19 +26,19 @@ Page and Pro waitlist: https://datawharftools.com/x12/
 
 ## Quick start (3 commands)
 
-You need Java 17 or newer (download `x12diff.jar` from the Releases page), or use the Windows app image (`x12diff.exe`, runtime bundled).
+You need Java 17 or newer (download `x12diff-0.2.3.jar` from the [Releases page](https://github.com/datawharf-tools/x12diff/releases/latest)), or use the Windows app image (`x12diff.exe`, runtime bundled).
 
 ```
-java -jar x12diff.jar gen --members 300 --old old.834 --new new.834 --seed 3
-java -jar x12diff.jar diff old.834 new.834 --csv changes.csv
-java -jar x12diff.jar parse new.834
+java -jar x12diff-0.2.3.jar gen --members 300 --old old.834 --new new.834 --seed 3
+java -jar x12diff-0.2.3.jar diff old.834 new.834 --csv changes.csv
+java -jar x12diff-0.2.3.jar parse new.834
 ```
 
-The first command writes a fake old/new pair (no real data is ever used). The second compares them and writes `changes.csv`; it exits with code 1 when it finds differences, which is expected (see exit codes below). The third summarizes a file. Replace the fake files with your own to use it for real. For 835 and 837 files, generate a synthetic set with `x12diff gen --kind claims --claims 200 --dir demo --seed 4`, then:
+The first command writes a fake old/new pair (no real data is ever used). The second compares them and writes `changes.csv`; it exits with code 1 when it finds differences, which is expected (see exit codes below). The third summarizes a file. Replace the fake files with your own to use it for real. For 835 and 837 files, generate a synthetic set with `java -jar x12diff-0.2.3.jar gen --kind claims --claims 200 --dir demo --seed 4`, then:
 
 ```
-java -jar x12diff.jar remit demo/remits_1.835 demo/remits_2.835 --csv lines.csv
-java -jar x12diff.jar recon demo --csv recon.csv
+java -jar x12diff-0.2.3.jar remit demo/remits_1.835 demo/remits_2.835 --csv lines.csv
+java -jar x12diff-0.2.3.jar recon demo --csv recon.csv
 ```
 
 ## Running it: options and exit codes
@@ -46,9 +46,9 @@ java -jar x12diff.jar recon demo --csv recon.csv
 You need Java 17 or newer (the jar is built for Java 17 and also runs on 21), or use the Windows app image (`x12diff.exe`, runtime bundled).
 
 ```
-java -jar x12diff.jar parse enrollment.834
-java -jar x12diff.jar diff last_month.834 this_month.834 --csv changes.csv
-java -jar x12diff.jar diff old.834 new.834 --profile my-profile.properties
+java -jar x12diff-0.2.3.jar parse enrollment.834
+java -jar x12diff-0.2.3.jar diff last_month.834 this_month.834 --csv changes.csv
+java -jar x12diff-0.2.3.jar diff old.834 new.834 --profile my-profile.properties
 ```
 
 Exit codes: `0` ok (`diff`: no differences), `1` `diff` found differences, `2` error, `3` input incomplete or inconsistent (also for `parse`: an empty file, a missing trailer or a count mismatch; `parse --allow-incomplete` returns 0). Errors print a one-line message, never a stack trace.
