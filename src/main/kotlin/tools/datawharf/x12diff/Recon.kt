@@ -7,9 +7,11 @@ import java.util.TreeMap
 
 private class SetRef(
     val id: Int, val fileIdx: Int, val isa13: String, val gs02: String, val gs03: String, val gs06: String, val st02: String,
-    val gsDate: Long?, val gs08: String,
+    val gsDate: Long?, val gs08: String, val isaSnd: String = "", val isaRcv: String = "",
 ) {
     val group: String get() = "$fileIdx|$isa13|$gs06"
+    /** One interchange: the file, its ISA13, and its sender/receiver. */
+    val interchange: String get() = "$fileIdx|$isa13|$isaSnd|$isaRcv"
 }
 
 private class ReconClaim(val id: String, val charge: Long, val date: Int, val setId: Int, val fileIdx: Int) {
@@ -41,6 +43,8 @@ class ReconSummary {
     var remitChecks = 0L
     var ackSets = 0
     var rejectedSets = 0
+    var ta1Count = 0
+    var ta1RejectedInterchanges = 0
     var statusEntries277 = 0L
     var chargedTotal = 0L
     var paidTotal = 0L
@@ -74,6 +78,7 @@ object ReconCmd {
         val dateLocs = profile.list("recon.claim.date", listOf("DTP*472:03", "DTP*434:03")).map { Locator.parse(it, "recon.claim.date") }
         val dateFallback = Locator.parse(profile.value("recon.claim.date.fallback", "BHT:04"), "recon.claim.date.fallback")
         val ackReject = profile.list("recon.ack.reject.codes", listOf("R", "M", "W", "X")).toSet()
+        val ta1Reject = profile.list("recon.ta1.reject.codes", listOf("R")).toSet()
         val statusReject = profile.list("recon.status.reject.categories", listOf("A3", "A4", "A6", "A7", "A8")).toSet()
         val statusAccept = profile.list("recon.status.accept.categories", listOf("A0", "A1", "A2")).toSet()
         val stems = files.map { stem(it) }
@@ -87,6 +92,9 @@ object ReconCmd {
         val byGsSt = HashMap<String, ArrayList<SetRef>>()
         val byGs = HashMap<String, ArrayList<SetRef>>()
         val rejected = BitSet()
+        val taRejected = BitSet()
+        val taNotes = HashMap<Int, String>()
+        val byIsa = HashMap<String, ArrayList<SetRef>>()
         val orphans = ArrayList<Orphan>()
 
         fun chain(h: ReconClaim): List<ReconClaim> { val l = ArrayList<ReconClaim>(); var t: ReconClaim? = h; while (t != null) { l.add(t); t = t.next }; return l }
@@ -103,8 +111,9 @@ object ReconCmd {
             override fun begin(type: String, st: Segment, gs: Segment?, d: Delimiters, file: String) {
                 setId = sets.size
                 val ref = SetRef(setId, fileIdx, isa13 = curIsa, gs02 = gs?.el(2) ?: "", gs03 = gs?.el(3) ?: "", gs06 = gs?.el(6) ?: "", st02 = st.el(2),
-                    gsDate = Dates.days(gs?.el(4) ?: ""), gs08 = gs?.el(8) ?: "")
+                    gsDate = Dates.days(gs?.el(4) ?: ""), gs08 = gs?.el(8) ?: "", isaSnd = curSnd, isaRcv = curRcv)
                 sets.add(ref)
+                byIsa.getOrPut(ref.isa13) { ArrayList() }.add(ref)
                 byGsSt.getOrPut("${ref.gs06}|${ref.st02}") { ArrayList() }.add(ref)
                 byGs.getOrPut(ref.gs06) { ArrayList() }.add(ref)
                 sum.sets837++
@@ -113,6 +122,8 @@ object ReconCmd {
             }
 
             var curIsa = ""
+            var curSnd = ""
+            var curRcv = ""
 
             private fun flush() {
                 val id = cur ?: return
@@ -158,9 +169,11 @@ object ReconCmd {
         }
         for ((i, f) in files.withIndex()) {
             fileIdx = i
-            h837.curIsa = isa13Of(f)
+            h837.curIsa = ""; h837.curSnd = ""; h837.curRcv = ""
             val chk = EnvelopeChecker()
-            TxWalker.walk(f, mapOf("837" to h837), chk)
+            TxWalker.walk(f, mapOf("837" to h837), chk) { s ->
+                if (s.id == "ISA") { h837.curIsa = s.el(13); h837.curSnd = s.el(6).trim(); h837.curRcv = s.el(8).trim() }
+            }
             sum.envelope.add(f.fileName.toString(), chk)
         }
         sum.claims = all.size.toLong()
@@ -374,22 +387,63 @@ object ReconCmd {
 
             override fun end(complete: Boolean) {}
         }
+        /** TA1 (interchange acknowledgement): TA101 is the ISA13 of the interchange it answers, TA104 the verdict. */
+        fun handleTa1(t: Segment, ackSnd: String, ackRcv: String, fname: String, fileStem: String) {
+            val ctl = t.el(1)
+            val code = t.el(4)
+            val note = t.el(5)
+            val noteText = if (note.isEmpty()) "" else ", note code $note"
+            val cands = byIsa[ctl] ?: emptyList<SetRef>()
+            val isReject = code in ta1Reject
+            if (!isReject && code != "E") return
+            if (cands.isEmpty()) {
+                addWarn("$fname: TA1 ${if (isReject) "rejected" else "accepted with errors"} interchange $ctl (TA104 $code$noteText) but no 837 with that ISA13 is in the input; nothing was marked")
+                return
+            }
+            var c: List<SetRef> = cands
+            if (c.map { it.interchange }.distinct().size > 1) {
+                val m = c.filter { (it.isaSnd == ackRcv && it.isaRcv == ackSnd) || (it.isaSnd == ackSnd && it.isaRcv == ackRcv) }
+                if (m.isNotEmpty() && m.size < c.size) c = m
+            }
+            if (c.map { it.interchange }.distinct().size > 1) {
+                val f = c.filter { stems[it.fileIdx] == fileStem }
+                if (f.isNotEmpty() && f.size < c.size) c = f
+            }
+            if (c.map { it.interchange }.distinct().size > 1) {
+                sum.ambiguousTies++
+                addWarn("$fname: TA1 for interchange $ctl (TA104 $code$noteText) matches ${c.map { it.interchange }.distinct().size} interchanges (same ISA13 in several files); no claim was marked. Name the TA1 file like its 837 or keep one batch per folder")
+                return
+            }
+            if (!isReject) {
+                addWarn("$fname: TA1 accepted interchange $ctl with errors (TA104 E$noteText); its claims were not marked. Add E to recon.ta1.reject.codes in the profile to treat it as a rejection")
+                return
+            }
+            sum.ta1RejectedInterchanges++
+            for (r in c) { taRejected.set(r.id); taNotes[r.id] = "TA1 TA104=$code$noteText" }
+        }
         val handlers = mapOf("835" to h835, "999" to hAck, "997" to hAck, "277" to h277)
         for ((i, f) in files.withIndex()) {
             fileIdx = i
-            val seen = TxWalker.walk(f, handlers)
-            val known = (seen["837"] ?: 0) + (seen["835"] ?: 0) + (seen["999"] ?: 0) + (seen["997"] ?: 0) + (seen["277"] ?: 0)
-            if (known == 0) addWarn("${f.fileName}: no 837, 835, 999 or 277 transaction set found (skipped)")
+            var ta1Here = 0
+            var isaSnd = ""
+            var isaRcv = ""
+            val seen = TxWalker.walk(f, handlers, null) { s ->
+                if (s.id == "ISA") { isaSnd = s.el(6).trim(); isaRcv = s.el(8).trim() }
+                else { ta1Here++; sum.ta1Count++; handleTa1(s, isaSnd, isaRcv, f.fileName.toString(), stems[i]) }
+            }
+            val known = (seen["837"] ?: 0) + (seen["835"] ?: 0) + (seen["999"] ?: 0) + (seen["997"] ?: 0) + (seen["277"] ?: 0) + ta1Here
+            if (known == 0) addWarn("${f.fileName}: no 837, 835, 999, 997, 277 or TA1 found (skipped)")
         }
-        sum.rejectedSets = rejected.cardinality()
+        sum.rejectedSets = BitSet().also { it.or(rejected); it.or(taRejected) }.cardinality()
 
         // ---------- classify and report ----------
-        var w: BufferedWriter? = null
+        var of: OutFile? = null
         try {
             if (csvPath != null) {
-                w = Csv.open(csvPath)
-                w.write(Csv.line(HEADER))
+                of = Csv.open(csvPath)
+                of.w.write(Csv.line(HEADER))
             }
+            val w = of?.w
             fun emit(row: List<String>, status: String) {
                 sum.counts.merge(status, 1L, Long::plus)
                 w?.write(Csv.line(row))
@@ -397,15 +451,18 @@ object ReconCmd {
             }
             for (c in all) {
                 val ackRej = rejected.get(c.setId)
+                val taRej = taRejected.get(c.setId)
                 val status: String
                 var source = ""
                 val notes = ArrayList<String>()
                 if (c.dup) notes.add("duplicate CLM01" + (c.matchHow?.let { "; remit matched by $it" } ?: ""))
                 c.tieNote?.let { notes.add(it) }
                 setNotes[c.setId]?.let { if (rejected.get(c.setId)) notes.add(it) }
+                if (taRej && c.remitEntries == 0) taNotes[c.setId]?.let { notes.add(it) }
                 if (c.remitEntries == 0) {
-                    status = if (ackRej || c.reject277 != null) "REJECTED" else "UNMATCHED"
-                    if (ackRej) source = "999 set rejected"
+                    status = if (ackRej || taRej || c.reject277 != null) "REJECTED" else "UNMATCHED"
+                    if (taRej) source = "TA1 interchange rejected"
+                    if (ackRej) source = (if (source.isEmpty()) "" else "$source; ") + "999 set rejected"
                     if (c.reject277 != null) source = (if (source.isEmpty()) "" else "$source; ") + "277CA category ${c.reject277}"
                 } else {
                     status = when {
@@ -419,6 +476,7 @@ object ReconCmd {
                     if (c.chargeMismatch) notes.add("charge differs between 837 (${Money.fmt(c.charge)}) and 835 (${Money.fmt(c.remitCharge)})")
                     if (c.paid > c.charge) { notes.add("paid exceeds the 837 charge"); addWarn("claim '${c.id}': paid ${Money.fmt(c.paid)} exceeds the 837 charge ${Money.fmt(c.charge)}") }
                     if (ackRej) notes.add("999 rejected the set but a remit exists")
+                    if (taRej) notes.add("TA1 rejected the interchange but a remit exists")
                     sum.paidTotal += c.paid
                 }
                 var age = ""
@@ -447,15 +505,10 @@ object ReconCmd {
             for (o in orphans) {
                 emit(listOf("ORPHAN", o.id, "", Money.fmt(o.charge), Money.fmt(o.paid), Money.fmt(o.patientResp), "", "", "", "no matching 837 claim; ${o.where}"), "ORPHAN")
             }
-            w?.close(); w = null
+            of?.commit()
         } finally {
-            try { w?.close() } catch (_: java.io.IOException) {}
+            of?.abort()
         }
         return sum
     }
-
-    /** ISA13 of the first interchange in a file (blank if unreadable). */
-    private fun isa13Of(p: Path): String = try {
-        java.nio.file.Files.newInputStream(p).use { ins -> X12Reader(ins).next()?.takeIf { it.id == "ISA" }?.el(13) ?: "" }
-    } catch (e: Exception) { "" }
 }

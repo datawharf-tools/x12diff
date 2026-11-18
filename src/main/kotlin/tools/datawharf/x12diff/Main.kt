@@ -6,7 +6,7 @@ import java.nio.file.Files
 import java.nio.file.NoSuchFileException
 import kotlin.system.exitProcess
 
-const val VERSION = "0.2.3"
+const val VERSION = "0.2.4"
 
 private val USAGE = """
 x12diff $VERSION - offline X12 inspector, 834 member diff, 835 remit and claim reconciliation (Datawharf Tools)
@@ -17,7 +17,7 @@ Usage:
   x12diff remit FILE_OR_DIR... [--csv lines.csv] [--rollup adjustments.csv] [--profile p.properties] [--show N] [--allow-incomplete]
   x12diff recon FILE_OR_DIR... [--csv claims.csv] [--profile p.properties] [--asof YYYYMMDD] [--show N] [--stats] [--allow-incomplete]
   x12diff gen --members N --old OLD --new NEW [--seed S] [--newlines] [--sets K]
-  x12diff gen --kind claims --claims N --dir DIR [--seed S] [--newlines] [--set-size K]
+  x12diff gen --kind claims --claims N --dir DIR [--seed S] [--newlines] [--set-size K] [--reject-set N]...
   x12diff profile            print the built-in profile (redirect to a file to customise)
   x12diff --version | --help
 
@@ -35,8 +35,21 @@ private fun show(c: Char): String = when (c) {
     else -> "'$c'"
 }
 
+/**
+ * Console output must show non-ASCII file names readably. On an interactive console use the console's own code
+ * page; when output is redirected (pipe or file) write UTF-8.
+ */
+private fun textStream(fd: java.io.FileDescriptor): PrintStream {
+    val cs = try { System.console()?.charset() } catch (e: Throwable) { null } ?: java.nio.charset.StandardCharsets.UTF_8
+    return PrintStream(java.io.FileOutputStream(fd), true, cs)
+}
+
 fun main(args: Array<String>) {
-    exitProcess(run(args, System.out, System.err))
+    val out = textStream(java.io.FileDescriptor.out)
+    val err = textStream(java.io.FileDescriptor.err)
+    val rc = run(args, out, err)
+    out.flush(); err.flush()
+    exitProcess(rc)
 }
 
 fun run(args: Array<String>, out: PrintStream, err: PrintStream): Int {
@@ -62,7 +75,7 @@ fun run(args: Array<String>, out: PrintStream, err: PrintStream): Int {
         err.println("error: file not found: ${e.file}")
         return 2
     } catch (e: IOException) {
-        err.println("error: cannot read or write file: ${e.message ?: e.javaClass.simpleName}")
+        err.println("error: cannot read or write file: ${ioReason(e)}")
         return 2
     } catch (e: OutOfMemoryError) {
         err.println("error: out of memory; try a larger heap, e.g. java -Xmx2g -jar x12diff.jar ...")
@@ -127,6 +140,7 @@ private fun cmdGen(a: List<String>, out: PrintStream): Int {
     var claimsN = 0L
     var dirP: String? = null
     var setSize = 40
+    val rejectSets = ArrayList<Int>()
     var i = 0
     while (i < a.size) {
         val x = a[i]
@@ -144,14 +158,15 @@ private fun cmdGen(a: List<String>, out: PrintStream): Int {
             "--kind" -> kind = value()
             "--claims" -> claimsN = value().toLongOrNull() ?: throw X12Exception("--claims needs a number")
             "--dir" -> dirP = value()
+            "--reject-set" -> rejectSets.add(value().toIntOrNull() ?: throw X12Exception("--reject-set needs a set number (1 is the first 837 set)"))
             "--set-size" -> setSize = value().toIntOrNull() ?: throw X12Exception("--set-size needs a number")
             else -> throw X12Exception("Unknown option '$x'")
         }
         i++
     }
     if (kind == "claims") {
-        if (claimsN < 1 || dirP == null) throw X12Exception("Usage: x12diff gen --kind claims --claims N --dir DIR [--seed S] [--newlines] [--set-size K]")
-        val r = GenClaims.generate(claimsN, safePath(dirP), seed, lines, setSize)
+        if (claimsN < 1 || dirP == null) throw X12Exception("Usage: x12diff gen --kind claims --claims N --dir DIR [--seed S] [--newlines] [--set-size K] [--reject-set N]...")
+        val r = GenClaims.generate(claimsN, safePath(dirP), seed, lines, setSize, rejectSets = rejectSets.toSet().takeIf { rejectSets.isNotEmpty() })
         out.println("Wrote synthetic claims.837, remits_1.835, remits_2.835, ack.999, status.277 to $dirP (fake data only)")
         out.println(
             "Expected recon: PAID ${fmt(r.paid)}, PARTIAL ${fmt(r.partial)}, DENIED ${fmt(r.denied)}, PATIENT_RESP ${fmt(r.patientResp)}, " +
@@ -163,6 +178,7 @@ private fun cmdGen(a: List<String>, out: PrintStream): Int {
     }
     if (kind != "834") throw X12Exception("--kind must be 834 or claims")
     if (members < 1 || oldP == null || newP == null) throw X12Exception("Usage: x12diff gen --members N --old OLD --new NEW [--seed S] [--newlines] [--sets K]")
+    requireDistinct("--old" to oldP, "--new" to newP)
     val op = safePath(oldP)
     val np = safePath(newP)
     val r = Gen.generate(members, op, np, seed, lines, sets)

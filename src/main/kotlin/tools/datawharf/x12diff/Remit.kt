@@ -241,13 +241,14 @@ object RemitCmd {
 
     fun run(files: List<Path>, profile: Profile, csvPath: String?, rollupPath: String?): RemitSummary {
         val sum = RemitSummary()
-        var w: BufferedWriter? = null
-        var rw: BufferedWriter? = null
+        var of: OutFile? = null
+        var rof: OutFile? = null
         try {
             if (csvPath != null) {
-                w = Csv.open(csvPath)
-                w.write(Csv.line(HEADER))
+                of = Csv.open(csvPath)
+                of.w.write(Csv.line(HEADER))
             }
+            val w = of?.w
             val listener = object : RemitListener {
                 override fun warn(msg: String) {
                     sum.warningCount++
@@ -292,19 +293,20 @@ object RemitCmd {
                 sum.envelope.add(f.fileName.toString(), chk)
                 if ((seen["835"] ?: 0) == 0) listener.warn("${f.fileName}: no 835 transaction set found")
             }
-            w?.close(); w = null
             if (rollupPath != null) {
-                rw = Csv.open(rollupPath)
+                rof = Csv.open(rollupPath)
+                val rw = rof.w
                 rw.write(Csv.line(listOf("group", "reason", "label", "count", "amount")))
                 for ((k, v) in sum.rollup) {
                     val g = k.substringBefore('-'); val r = k.substringAfter('-')
                     rw.write(Csv.line(listOf(g, r, profile.adjLabel(g, r), v[0].toString(), Money.fmt(v[1]))))
                 }
-                rw.close(); rw = null
             }
+            of?.commit()
+            rof?.commit()
         } finally {
-            try { w?.close() } catch (_: java.io.IOException) {}
-            try { rw?.close() } catch (_: java.io.IOException) {}
+            of?.abort()
+            rof?.abort()
         }
         return sum
     }

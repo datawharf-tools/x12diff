@@ -48,7 +48,7 @@ private class Entry(val h1: Long, val h2: Long, val start: Long, val delim: Int)
     var dup = false
 }
 
-private class ScanInfo(val sets: Int, val bgn: Set<String>)
+private class ScanInfo(val sets: Int, val bgn: Set<String>, val segments: Long)
 
 object Differ {
     private val BOUNDARY = setOf("SE", "GE", "IEA", "ISA", "GS", "ST")
@@ -59,6 +59,7 @@ object Differ {
         onMember: (List<Segment>, Long, Delimiters) -> Unit,
     ): ScanInfo {
         var sets = 0
+        var segCount = 0L
         val bgn = LinkedHashSet<String>()
         val chk = EnvelopeChecker()
         try {
@@ -81,6 +82,7 @@ object Differ {
                 }
                 while (true) {
                     val s = r.next() ?: break
+                    segCount++
                     chk.accept(s)
                     when (s.id) {
                         "ST" -> {
@@ -113,7 +115,7 @@ object Differ {
             throw X12Exception("Cannot read '${path.fileName}': ${e.message ?: e.javaClass.simpleName}")
         }
         env.add(path.fileName.toString(), chk)
-        return ScanInfo(sets, bgn)
+        return ScanInfo(sets, bgn, segCount)
     }
 
     private fun kindOf(values: Set<String>, profile: Profile): String {
@@ -150,7 +152,8 @@ object Differ {
             profile.hash(segs, h)
             index[k] = Entry(h[0], h[1], start, di).also { if (n > 1) it.dup = true }
         }
-        if (oldInfo.sets == 0) throw X12Exception("No 834 transaction set (ST*834) found in '$oldPath'")
+        // A file with no segments at all is reported as 0 members (exit 3), like parse does; any other file without an 834 is an error.
+        if (oldInfo.sets == 0 && oldInfo.segments > 0) throw X12Exception("No 834 transaction set (ST*834) found in '$oldPath'")
 
         // The new file is scanned next; the mode must be known before absent members are reported, so the
         // BGN08 of the new file is only known afterwards. Absent members are reported after the scan anyway.
@@ -228,7 +231,7 @@ object Differ {
                 if (rows.isEmpty()) sink(Row(type, k, "", "", "", "", "", listOf(detail, "content differs (segment order changed)").filter { it.isNotEmpty() }.joinToString("; ")))
                 else rows.forEach(sink)
             }
-            if (newInfo!!.sets == 0) throw X12Exception("No 834 transaction set (ST*834) found in '$newPath'")
+            if (newInfo!!.sets == 0 && newInfo!!.segments > 0) throw X12Exception("No 834 transaction set (ST*834) found in '$newPath'")
             for ((k, v) in index) if (!v.seen) gone.add(k to v)
         }
 

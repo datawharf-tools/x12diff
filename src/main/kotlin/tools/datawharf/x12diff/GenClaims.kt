@@ -177,13 +177,17 @@ object GenClaims {
         return netPaid to checks
     }
 
-    fun generate(claims: Long, dir: Path, seed: Long, lineBreaks: Boolean, setSize: Int, perCheck: Int = 100): Result {
+    fun generate(claims: Long, dir: Path, seed: Long, lineBreaks: Boolean, setSize: Int, perCheck: Int = 100, rejectSets: Set<Int>? = null): Result {
         if (claims < 1) throw X12Exception("--claims must be at least 1")
         if (setSize < 1) throw X12Exception("--set-size must be at least 1")
         Files.createDirectories(dir)
         val term = if (lineBreaks) "~\n" else "~"
         val setCount = ((claims + setSize - 1) / setSize).toInt()
-        val setRejected = BooleanArray(setCount) { unit(seed, 2, it.toLong()) < 0.05 }
+        // --reject-set N (1-based, repeatable): exactly those 837 sets are rejected by the 999; otherwise ~5% are chosen by seed.
+        if (rejectSets != null) for (r in rejectSets) if (r < 1 || r > setCount) {
+            throw X12Exception("--reject-set $r is out of range: $claims claims at --set-size $setSize make $setCount 837 set(s), numbered 1 to $setCount")
+        }
+        val setRejected = BooleanArray(setCount) { if (rejectSets != null) (it + 1) in rejectSets else unit(seed, 2, it.toLong()) < 0.05 }
         fun setOf(n: Long) = ((n - 1) / setSize).toInt()
         fun effective(n: Long): V? = if (setRejected[setOf(n)]) null else variant(seed, n)
 
@@ -265,7 +269,7 @@ object GenClaims {
         var rejectedSets = 0
         for (s in 0 until setCount) {
             d999.seg("AK2*837*" + (s + 1).toString().padStart(4, '0') + "*005010X222A1")
-            if (setRejected[s]) { rejectedSets++; d999.seg("IK5*R*5") } else d999.seg("IK5*A")
+            if (setRejected[s]) { rejectedSets++; d999.seg("IK3*CLM*14*2300*8"); d999.seg("IK4*2*1028*7*NOTAVALIDID"); d999.seg("IK5*R*5") } else d999.seg("IK5*A")
         }
         d999.seg("AK9*" + (if (rejectedSets == 0) "A" else "P") + "*$setCount*$setCount*${setCount - rejectedSets}")
         d999.se()

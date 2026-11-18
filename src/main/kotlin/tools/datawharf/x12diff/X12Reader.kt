@@ -65,7 +65,7 @@ class X12Reader(
         while (true) {
             c = read()
             if (c == -1) return null
-            if (c == 13 || c == 10 || c == 32 || c == 9) continue
+            if (c == 13 || c == 10 || c == 32 || c == 9 || c == 0x1A) continue // 0x1A: old DOS end-of-file marker
             if ((c == 0xEF || c == 0xBB || c == 0xBF) && offset() <= firstOffset + 3) continue
             break
         }

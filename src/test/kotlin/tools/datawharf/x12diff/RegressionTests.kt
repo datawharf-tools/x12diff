@@ -541,7 +541,7 @@ class RegressionTests {
         val f = write(d, "p.properties", "key.1 = REF*0F:02\nrecon.paid.min.ratio = 1.0\n")
         val o = write(d, "o.834", f834(listOf(member("SUBA", "MA"))))
         val r = cli("diff", o.toString(), o.toString(), "--profile", f.toString())
-        assertTrue("WARNING: profile key recon.paid.min.ratio" in r.out && "WARNING: profile key" in r.err, r.out + r.err)
+        assertTrue("WARNING: profile key recon.paid.min.ratio" in r.out && "profile key" !in r.err, r.out + r.err)
     }
 
     // ---------- N5 / N6 ----------
@@ -651,6 +651,178 @@ class RegressionTests {
     fun le_pairingCutoffNoticeIsAWarning() {
         val src = Files.readString(Path.of("src", "main", "kotlin", "tools", "datawharf", "x12diff", "Diff.kt"))
         assertTrue("WARNING: more than 100,000 ADDED members" in src)
-        assertEquals("0.2.3", VERSION)
+        assertEquals("0.2.4", VERSION)
+    }
+}
+
+/** Tests for the 0.2.4 release. */
+class Release024Tests {
+    private fun ta1File(d: Path, name: String, vararg ta1: String): Path {
+        val sb = StringBuilder(isa("000000099"))
+        for (t in ta1) sb.append(t).append("~")
+        sb.append("IEA*0*000000099~")
+        return write(d, name, sb.toString())
+    }
+
+    private fun claimFile(d: Path, name: String, isactl: String, vararg ids: String): Path =
+        write(d, name, env(f837(ids.map { Triple(it, "100", "20260105") }, bht = "20260105"), isactl = isactl, fid = "HC", gsver = "005010X222A1"))
+
+    // ---- 1: zero members ----
+    @Test
+    fun f1_diffAgainstAFileWithNoMembersIsLoudAndExits3() = inTemp { d ->
+        val o = write(d, "o.834", f834(listOf(member("SUBA", "MA"), member("SUBB", "MB"))))
+        val empty = write(d, "e.834", f834(emptyList()))
+        val txt = Files.readString(o, Charsets.ISO_8859_1); val lower = write(d, "l.834", txt.replace("~INS*", "~ins*"))
+        for (bad in listOf(empty, lower)) {
+            val r = cli("diff", o.toString(), bad.toString())
+            assertEquals(3, r.code, r.out + r.err)
+            assertTrue("EMPTY INPUT: new file has 0 members" in r.out && "EMPTY INPUT" in r.err, r.out)
+            val ok = cli("diff", o.toString(), bad.toString(), "--allow-incomplete")
+            assertEquals(1, ok.code, ok.out + ok.err)
+            assertTrue("accepted by --allow-incomplete" in ok.out)
+        }
+        val rOld = cli("diff", empty.toString(), o.toString())
+        assertEquals(3, rOld.code); assertTrue("old file has 0 members" in rOld.out)
+    }
+
+    @Test
+    fun f1_emptyFileGivesTheSameExitCodeInDiffAndParse() = inTemp { d ->
+        val o = write(d, "o.834", f834(listOf(member("SUBA", "MA"))))
+        val e = write(d, "empty.834", "")
+        assertEquals(3, cli("parse", e.toString()).code)
+        val r = cli("diff", o.toString(), e.toString())
+        assertEquals(3, r.code, r.out + r.err)
+        assertEquals(1, cli("diff", o.toString(), e.toString(), "--allow-incomplete").code)
+    }
+
+    // ---- 2: TA1 ----
+    @Test
+    fun f2_ta1RejectMarksOnlyTheMatchingInterchange() = inTemp { d ->
+        val a = claimFile(d, "a.837", "000000021", "A1", "A2")
+        val b = claimFile(d, "b.837", "000000022", "B1")
+        val ta = ta1File(d, "ack.ta1", "TA1*000000021*260101*1200*R*024")
+        val csv = d.resolve("o.csv")
+        val s = recon(listOf(a, b, ta), csv = csv)
+        assertEquals(2L, s.counts["REJECTED"], s.counts.toString())
+        assertEquals(1L, s.counts["UNMATCHED"])
+        assertEquals(1, s.ta1RejectedInterchanges); assertEquals(1, s.ta1Count)
+        assertEquals(1, s.rejectedSets)
+        val text = Files.readString(csv)
+        assertTrue("TA1 interchange rejected" in text && "note code 024" in text, text)
+        assertTrue(s.warnings.none { "TA1 or" in it || "skipped" in it }, s.warnings.toString())
+    }
+
+    @Test
+    fun f2_ta1AcceptedWithErrorsAndUntiedTa1BothWarn() = inTemp { d ->
+        val a = claimFile(d, "a.837", "000000021", "A1")
+        val e = ta1File(d, "e.ta1", "TA1*000000021*260101*1200*E*002")
+        val s = recon(listOf(a, e))
+        assertEquals(null, s.counts["REJECTED"]); assertEquals(1L, s.counts["UNMATCHED"])
+        assertTrue(s.warnings.any { "accepted interchange 000000021 with errors" in it }, s.warnings.toString())
+        val p = Profile.parse("key.1 = REF*0F:02\nrecon.ta1.reject.codes = R, E\n", "t")
+        assertEquals(1L, recon(listOf(a, e), profile = p).counts["REJECTED"])
+        val lost = ta1File(d, "x.ta1", "TA1*000000777*260101*1200*R*001")
+        val s2 = recon(listOf(a, lost))
+        assertEquals(null, s2.counts["REJECTED"])
+        assertTrue(s2.warnings.any { "no 837 with that ISA13" in it }, s2.warnings.toString())
+        val acc = ta1File(d, "ok.ta1", "TA1*000000021*260101*1200*A*000")
+        val s3 = recon(listOf(a, acc))
+        assertEquals(0L, s3.warningCount); assertEquals(null, s3.counts["REJECTED"])
+    }
+
+    @Test
+    fun f2_ta1WorksForTheSecondInterchangeOfOneFile() = inTemp { d ->
+        val two = write(d, "two.837",
+            env(f837(listOf(Triple("P1", "100", "20260105"))), isactl = "000000031", fid = "HC", gsver = "005010X222A1") +
+                env(f837(listOf(Triple("P2", "100", "20260105"))), isactl = "000000032", fid = "HC", gsver = "005010X222A1"))
+        val ta = ta1File(d, "t.ta1", "TA1*000000032*260101*1200*R*001")
+        val csv = d.resolve("o.csv")
+        recon(listOf(two, ta), csv = csv)
+        val rows = Files.readAllLines(csv).filter { it.contains("REJECTED") }
+        assertEquals(1, rows.size, rows.toString()); assertTrue("P2" in rows[0])
+    }
+
+    // ---- 3: gen --reject-set ----
+    @Test
+    fun f3_genRejectSetProducesAMatchingValid999() = inTemp { d ->
+        val dir = d.resolve("demo")
+        val r = cli("gen", "--kind", "claims", "--claims", "200", "--dir", dir.toString(), "--seed", "4", "--reject-set", "2", "--reject-set", "4")
+        assertEquals(0, r.code, r.out + r.err)
+        assertTrue("(80 by 999" in r.out, r.out)
+        assertEquals(0, cli("parse", dir.resolve("ack.999").toString()).code) // SE counts and control numbers are valid
+        val files = listOf("claims.837", "remits_1.835", "remits_2.835", "ack.999", "status.277").map { dir.resolve(it) }
+        val s = recon(files)
+        assertEquals(2, s.rejectedSets)
+        val expected = Regex("REJECTED (\\d+)").find(r.out)!!.groupValues[1].toLong()
+        assertEquals(expected, s.counts["REJECTED"])
+        val bad = cli("gen", "--kind", "claims", "--claims", "200", "--dir", dir.toString(), "--reject-set", "9")
+        assertEquals(2, bad.code); assertTrue("out of range" in bad.err, bad.err)
+    }
+
+    // ---- 4: no partial output ----
+    @Test
+    fun f4_failedRunLeavesNoPartialOutputAndKeepsAnExistingFile() = inTemp { d ->
+        val o = write(d, "o.834", f834(listOf(member("SUBA", "MA"))))
+        val bad = write(d, "bad.834", "not x12 at all")
+        val csv = d.resolve("out.csv")
+        val r = cli("diff", o.toString(), bad.toString(), "--csv", csv.toString())
+        assertEquals(2, r.code, r.out + r.err)
+        assertFalse(Files.exists(csv))
+        assertEquals(listOf("bad.834", "o.834"), Files.list(d).use { st -> st.map { it.fileName.toString() }.sorted().toList() })
+        Files.writeString(csv, "keep me")
+        assertEquals(2, cli("diff", o.toString(), bad.toString(), "--csv", csv.toString()).code)
+        assertEquals("keep me", Files.readString(csv))
+        // success replaces it and leaves no temp file
+        assertEquals(0, cli("diff", o.toString(), o.toString(), "--csv", csv.toString()).code)
+        assertTrue(Files.readString(csv).contains("change_type"))
+        assertEquals(3L, Files.list(d).use { it.count() })
+    }
+
+    @Test
+    fun f4_abortDeletesTheTemporaryFile() = inTemp { d ->
+        val out = Csv.open(d.resolve("x.csv").toString())
+        out.w.write("partial")
+        out.abort()
+        assertEquals(0L, Files.list(d).use { it.count() })
+    }
+
+    // ---- 5: same output path ----
+    @Test
+    fun f5_theSameOutputPathTwiceIsAnError() = inTemp { d ->
+        val o = write(d, "o.834", f834(listOf(member("SUBA", "MA"))))
+        val r835 = write(d, "r.835", env(f835(listOf("CLP*C1*1*100*90*10*12", "CAS*CO*45*10"), "90"), fid = "HP"))
+        val x = d.resolve("x.csv").toString()
+        val a = cli("remit", r835.toString(), "--csv", x, "--rollup", x)
+        assertEquals(2, a.code); assertTrue("same file" in a.err, a.err)
+        assertFalse(Files.exists(d.resolve("x.csv")))
+        val g = cli("gen", "--members", "10", "--old", d.resolve("g.834").toString(), "--new", d.resolve("g.834").toString())
+        assertEquals(2, g.code); assertTrue("same file" in g.err)
+        // output over an input file is refused too
+        val c = cli("diff", o.toString(), o.toString(), "--csv", o.toString())
+        assertEquals(2, c.code); assertTrue("same file" in c.err)
+        assertTrue(Files.readString(o).startsWith("ISA"))
+    }
+
+    // ---- 6: wording ----
+    @Test
+    fun f6_errorWording() = inTemp { d ->
+        val o = write(d, "o.834", f834(listOf(member("SUBA", "MA"))))
+        val dir = Files.createDirectory(d.resolve("g"))
+        assertTrue("is a folder" in cli("diff", o.toString(), dir.toString()).err)
+        assertTrue("is a folder" in cli("remit", o.toString(), "--csv", dir.toString()).err)
+        val p = cli("diff", o.toString(), o.toString(), "--profile", d.resolve("none.properties").toString())
+        assertEquals(2, p.code); assertTrue("Profile not found" in p.err, p.err)
+    }
+
+    // ---- 8: Ctrl-Z ----
+    @Test
+    fun f8_trailingCtrlZIsNotASegment() = inTemp { d ->
+        val text = f834(listOf(member("SUBA", "MA")))
+        val plain = write(d, "p.834", text)
+        val z = write(d, "z.834", text + "\u001A")
+        val rp = cli("parse", plain.toString()); val rz = cli("parse", z.toString())
+        assertEquals(0, rz.code, rz.out + rz.err)
+        assertEquals(rp.out.substringAfter("Segments:"), rz.out.substringAfter("Segments:"))
+        assertEquals(0, cli("diff", plain.toString(), z.toString()).code)
     }
 }

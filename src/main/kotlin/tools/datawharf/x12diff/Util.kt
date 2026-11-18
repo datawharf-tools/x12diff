@@ -63,19 +63,78 @@ object Csv {
         }
     }
 
-    /** Opens a UTF-8 CSV writer with a byte-order mark so Excel reads accented characters correctly. */
-    fun open(path: String): BufferedWriter {
-        val p = safePath(path)
+    /**
+     * Opens a UTF-8 CSV writer with a byte-order mark so Excel reads accented characters correctly.
+     * The data goes to a temporary file next to the target; [OutFile.commit] renames it into place and
+     * [OutFile.abort] deletes it, so a failed run never leaves a half-written (or header-only) file.
+     */
+    fun open(path: String): OutFile {
+        val target = safePath(path)
+        if (Files.isDirectory(target)) throw X12Exception("Cannot write '$path': it is a folder, not a file name")
+        val dir = target.toAbsolutePath().parent
+        if (dir != null && !Files.isDirectory(dir)) throw X12Exception("Cannot write '$path': the folder does not exist")
+        val tmp = (dir ?: target.toAbsolutePath()).resolve("." + target.fileName.toString() + ".x12diff-tmp")
         try {
-            val w = Files.newBufferedWriter(p, StandardCharsets.UTF_8)
+            val w = Files.newBufferedWriter(tmp, StandardCharsets.UTF_8)
             w.write("﻿")
-            return w
-        } catch (e: NoSuchFileException) {
-            throw X12Exception("Cannot write '$path': the folder does not exist")
+            return OutFile(path, target, tmp, w)
         } catch (e: IOException) {
-            throw X12Exception("Cannot write '$path': ${e.message ?: e.javaClass.simpleName}")
+            throw X12Exception("Cannot write '$path': ${ioReason(e)}")
         }
     }
+}
+
+/** Human wording for an I/O failure (the raw message is often just a path). */
+fun ioReason(e: IOException): String = when (e) {
+    is java.nio.file.AccessDeniedException -> "access denied (read-only location, or the file is open in another program)"
+    is NoSuchFileException -> "the folder does not exist"
+    is java.nio.file.FileSystemException -> e.reason ?: e.message ?: e.javaClass.simpleName
+    else -> e.message ?: e.javaClass.simpleName
+}
+
+/** An output file written via a temporary name; see [Csv.open]. */
+class OutFile(private val label: String, private val target: Path, private val tmp: Path, val w: BufferedWriter) {
+    private var done = false
+
+    fun commit() {
+        if (done) return
+        done = true
+        try {
+            w.close()
+            Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        } catch (e: IOException) {
+            try { Files.deleteIfExists(tmp) } catch (_: IOException) {}
+            throw X12Exception("Cannot write '$label': ${ioReason(e)}")
+        }
+    }
+
+    /** Closes and deletes the temporary file. Safe to call after [commit]. */
+    fun abort() {
+        if (done) return
+        done = true
+        try { w.close() } catch (_: IOException) {}
+        try { Files.deleteIfExists(tmp) } catch (_: IOException) {}
+    }
+}
+
+/** Fails when two outputs (or an output and an input) name the same file. */
+fun requireDistinct(vararg named: Pair<String, String?>) {
+    val seen = ArrayList<Triple<String, String, Path>>()
+    for ((label, p) in named) {
+        if (p == null) continue
+        val path = safePath(p)
+        for ((l2, p2, path2) in seen) {
+            if (sameFile(path, path2)) throw X12Exception("$label and $l2 name the same file ('$p'${if (p != p2) " and '$p2'" else ""}); use different file names")
+        }
+        seen.add(Triple(label, p, path))
+    }
+}
+
+private fun sameFile(a: Path, b: Path): Boolean {
+    try { if (Files.exists(a) && Files.exists(b)) return Files.isSameFile(a, b) } catch (_: IOException) {}
+    val x = a.toAbsolutePath().normalize().toString()
+    val y = b.toAbsolutePath().normalize().toString()
+    return if (System.getProperty("os.name", "").startsWith("Windows")) x.equals(y, ignoreCase = true) else x == y
 }
 
 /** Amounts as integer cents. */
@@ -178,8 +237,9 @@ object TxWalker {
     /**
      * Returns the count of transaction sets seen per ST01 type (all types, wanted or not).
      * If [env] is given, every segment is also fed to it and it is finished at end of file.
+     * [onInterchange] sees every ISA and TA1 segment (TA1 lives outside any transaction set).
      */
-    fun walk(path: Path, handlers: Map<String, TxHandler>, env: EnvelopeChecker? = null): Map<String, Int> {
+    fun walk(path: Path, handlers: Map<String, TxHandler>, env: EnvelopeChecker? = null, onInterchange: ((Segment) -> Unit)? = null): Map<String, Int> {
         val seen = java.util.TreeMap<String, Int>()
         var open: TxHandler? = null
         var gs: Segment? = null
@@ -190,6 +250,7 @@ object TxWalker {
                 while (true) {
                     val s = r.next() ?: break
                     env?.accept(s)
+                    if (onInterchange != null && (s.id == "ISA" || s.id == "TA1")) onInterchange(s)
                     when (s.id) {
                         "ST" -> {
                             open?.end(false); open = null

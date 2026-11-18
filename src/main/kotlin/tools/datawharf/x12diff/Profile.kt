@@ -193,6 +193,9 @@ recon.claim.date = DTP*472:03, DTP*434:03
 recon.claim.date.fallback = BHT:04
 # Acknowledgement status values (IK5/AK5 element 1, AK9 element 1) that count as rejected.
 recon.ack.reject.codes = R, M, W, X
+# TA1 interchange acknowledgement codes (TA104) that count as rejected: every claim in the matching interchange
+# (TA101 = the 837's ISA13) is marked REJECTED. E (accepted with errors) is only warned about by default.
+recon.ta1.reject.codes = R
 # Claim-status category values (first part of STC01 in a 277CA) that reject a claim, and those that clear an
 # earlier rejection when they arrive later.
 recon.status.reject.categories = A3, A4, A6, A7, A8
@@ -207,7 +210,7 @@ recon.ack.window.days = 30
         private val KNOWN = setOf(
             "member.start", "term.code", "term.codes", "term.dates", "align", "ignore", "mode.full.codes", "mode.change.codes",
             "recon.reversal.codes", "recon.denied.codes", "recon.contractual", "recon.claim.date", "recon.claim.date.fallback",
-            "recon.ack.reject.codes", "recon.status.reject.categories", "recon.status.accept.categories", "recon.ack.window.days",
+            "recon.ack.reject.codes", "recon.ta1.reject.codes", "recon.status.reject.categories", "recon.status.accept.categories", "recon.ack.window.days",
         )
 
         private fun unknownOf(map: Map<String, String>, source: String): List<String> {
@@ -223,10 +226,13 @@ recon.ack.window.days = 30
         fun default(): Profile = parse(DEFAULT_TEXT, "built-in default")
 
         fun load(path: Path): Profile {
+            if (Files.isDirectory(path)) throw X12Exception("Profile '$path' is a folder, not a file")
             val text = try {
                 String(Files.readAllBytes(path), StandardCharsets.UTF_8)
+            } catch (e: java.nio.file.NoSuchFileException) {
+                throw X12Exception("Profile not found: '$path'")
             } catch (e: java.io.IOException) {
-                throw X12Exception("Cannot read profile '$path': ${e.message}")
+                throw X12Exception("Cannot read profile '$path': ${ioReason(e)}")
             }
             return parse(text, path.toString())
         }

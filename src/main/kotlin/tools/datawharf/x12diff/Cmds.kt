@@ -36,7 +36,7 @@ private fun showOpt(o: Opts): Int {
 
 private fun profileOpt(o: Opts, out: PrintStream, err: PrintStream): Profile {
     val p = o.flags["--profile"]?.let { Profile.load(safePath(it)) } ?: Profile.default()
-    for (u in p.unknownKeys) { out.println("WARNING: profile key $u"); err.println("WARNING: profile key $u") }
+    for (u in p.unknownKeys) out.println("WARNING: profile key $u")
     return p
 }
 
@@ -64,18 +64,23 @@ internal fun cmdDiff(a: List<String>, out: PrintStream, err: PrintStream): Int {
     val profile = profileOpt(o, out, err)
     val oldP = safePath(o.pos[0])
     val newP = safePath(o.pos[1])
-    if (!Files.isRegularFile(oldP)) throw X12Exception("File not found: ${o.pos[0]}")
-    if (!Files.isRegularFile(newP)) throw X12Exception("File not found: ${o.pos[1]}")
+    for (p in listOf(oldP to o.pos[0], newP to o.pos[1])) {
+        if (Files.isDirectory(p.first)) throw X12Exception("'${p.second}' is a folder; diff takes two files")
+        if (!Files.isRegularFile(p.first)) throw X12Exception("File not found: ${p.second}")
+    }
     val csvPath = o.flags["--csv"]
+    requireDistinct("--csv" to csvPath, "old file" to o.pos[0])
+    requireDistinct("--csv" to csvPath, "new file" to o.pos[1])
 
     val t0 = System.nanoTime()
     var shown = 0
-    var w: BufferedWriter? = null
+    var of: OutFile? = null
     try {
         if (csvPath != null) {
-            w = Csv.open(csvPath)
-            w.write(Csv.line(listOf("change_type", "member_key", "segment", "element", "label", "old_value", "new_value", "detail")))
+            of = Csv.open(csvPath)
+            of.w.write(Csv.line(listOf("change_type", "member_key", "segment", "element", "label", "old_value", "new_value", "detail")))
         }
+        val w = of?.w
         val sum = Differ.diff(oldP, newP, profile, mode) { r ->
             w?.write(Csv.line(listOf(r.type, r.key, r.segment, r.element, r.label, r.oldValue, r.newValue, r.detail)))
             if (shown < showN) {
@@ -85,8 +90,7 @@ internal fun cmdDiff(a: List<String>, out: PrintStream, err: PrintStream): Int {
                 out.println("  ${r.type.padEnd(10)} ${Csv.fixUtf8(r.key)}  ${Csv.fixUtf8(what)}")
             }
         }
-        w?.close()
-        w = null
+        of?.commit()
         out.println("Old: ${o.pos[0]}  members: ${fmt(sum.oldMembers)}  (BGN08 ${sum.oldBgn}: ${sum.oldKind})")
         out.println("New: ${o.pos[1]}  members: ${fmt(sum.newMembers)}  (BGN08 ${sum.newBgn}: ${sum.newKind})")
         out.println("Mode: ${sum.mode}" + if (sum.mode == "change") " (a member missing from the new file is not termed)" else " (a member missing from the new file is termed)")
@@ -105,11 +109,31 @@ internal fun cmdDiff(a: List<String>, out: PrintStream, err: PrintStream): Int {
             val peak = ManagementFactory.getMemoryPoolMXBeans().filter { it.type == MemoryType.HEAP }.sumOf { it.peakUsage.used }
             out.println(String.format("Elapsed: %.1f s   Peak heap (sum of pool peaks): %d MB", secs, peak / (1024 * 1024)))
         }
-        if (envelopeProblems(sum.envelope, out, err, o.flags.containsKey("--allow-incomplete"))) return 3
+        val allow = o.flags.containsKey("--allow-incomplete")
+        val empty = zeroMembers(sum, o.pos[0], o.pos[1], out, err, allow)
+        if (envelopeProblems(sum.envelope, out, err, allow) || empty) return 3
         return if (sum.hasDifferences) 1 else 0
     } finally {
-        try { w?.close() } catch (_: IOException) {}
+        of?.abort()
     }
+}
+
+/**
+ * A file with no members (empty, not an 834, lowercase segment IDs, wrong member-start segment) would otherwise
+ * report every member of the other file as ADDED or TERMED. Returns true when that must block a normal exit.
+ */
+private fun zeroMembers(sum: DiffSummary, oldName: String, newName: String, out: PrintStream, err: PrintStream, allow: Boolean): Boolean {
+    val bad = ArrayList<String>()
+    if (sum.oldMembers == 0L) bad.add("old file has 0 members ($oldName)")
+    if (sum.newMembers == 0L) bad.add("new file has 0 members ($newName)")
+    if (bad.isEmpty()) return false
+    val tail = if (allow) " (accepted by --allow-incomplete)" else ""
+    for (b in bad) {
+        val m = "EMPTY INPUT: $b; the differences above are not meaningful (empty file, not an 834, lowercase segment IDs, or a wrong member-start segment in the profile?)$tail"
+        out.println(m); err.println(m)
+    }
+    if (!allow) err.println("error: a file has no members; fix the input or rerun with --allow-incomplete to accept it")
+    return !allow
 }
 
 internal fun cmdRemit(a: List<String>, out: PrintStream, err: PrintStream): Int {
@@ -119,6 +143,7 @@ internal fun cmdRemit(a: List<String>, out: PrintStream, err: PrintStream): Int 
     val showN = showOpt(o)
     val skipped = ArrayList<String>()
     val files = expandInputs(o.pos, skipped)
+    requireDistinct(*(listOf("--csv" to o.flags["--csv"], "--rollup" to o.flags["--rollup"]) + files.map { "input file" to it.toString() }).toTypedArray())
     val s = RemitCmd.run(files, profile, o.flags["--csv"], o.flags["--rollup"])
     skippedNote(skipped, out)
     out.println("Files: ${fmt(s.files.toLong())}   835 checks: ${fmt(s.checks)}")
@@ -148,11 +173,13 @@ internal fun cmdRecon(a: List<String>, out: PrintStream, err: PrintStream): Int 
     val showN = showOpt(o)
     val skipped = ArrayList<String>()
     val files = expandInputs(o.pos, skipped)
+    requireDistinct(*(listOf("--csv" to o.flags["--csv"]) + files.map { "input file" to it.toString() }).toTypedArray())
     val t0 = System.nanoTime()
     val s = ReconCmd.run(files, profile, o.flags["--csv"], o.flags["--asof"] ?: Dates.today(), showN)
     skippedNote(skipped, out)
     out.println("Files: ${fmt(files.size.toLong())}   837 claims: ${fmt(s.claims)} in ${fmt(s.sets837.toLong())} sets   835 claim entries: ${fmt(s.remitEntries)} on ${fmt(s.remitChecks)} checks")
-    out.println("Acknowledgement sets: ${fmt(s.ackSets.toLong())} (${fmt(s.rejectedSets.toLong())} 837 sets rejected)   277CA claim statuses: ${fmt(s.statusEntries277)}")
+    out.println("Acknowledgement sets: ${fmt(s.ackSets.toLong())} (${fmt(s.rejectedSets.toLong())} 837 sets rejected)   277CA claim statuses: ${fmt(s.statusEntries277)}" +
+        if (s.ta1Count > 0) "   TA1: ${fmt(s.ta1Count.toLong())} (${fmt(s.ta1RejectedInterchanges.toLong())} interchanges rejected)" else "")
     for (k in listOf("PAID", "PARTIAL", "DENIED", "PATIENT_RESP", "REVERSED", "ADJUSTED", "UNMATCHED", "REJECTED", "ORPHAN")) {
         out.println("${(k + ":").padEnd(14)}${fmt(s.counts[k] ?: 0L)}")
     }
