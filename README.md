@@ -19,41 +19,65 @@ Page and Pro waitlist: https://datawharftools.com/x12/
 
 ## Why use it
 
-- It streams. Memory depends on the number of members (diff) or claims (recon), not on file size. Two synthetic 300 MB 834 files diff in about 8 seconds, and a synthetic 295 MB 837/835/999/277 set reconciles in about 6 seconds with a 512 MB heap.
+- It streams. Memory depends on the number of members (diff) or claims (recon), not on file size. On a desktop PC (24-thread Intel Core Ultra 9, 64 GB RAM, other programs running) we measured, on synthetic files: two 260 MB 834 files (1,000,000 members each) compared in about 8 seconds (the jar with Java's default heap used about 1.7 GB; the Windows app, capped at 512 MB, took about the same time), and a 1,000,000-claim 837/835/999/277 set (about 300 MB) reconciled in about 8 seconds. Flattening its 144 MB of 835 remits took about 3 seconds. A slower or busier PC takes longer: one run on a heavily loaded PC took about 36 seconds for the diff. Your files and hardware will differ.
 - **Privacy: x12diff runs entirely on your machine and makes no network connections.** It has no telemetry, no update check and no network code. It reads the files you name and writes the CSV you ask for.
 - It checks envelopes (SE, GE, IEA, control numbers) and refuses to give you a quiet wrong answer from a cut-off file: it exits with code 3 and a loud notice.
 - It ships no implementation-guide text. You set member keys, termination codes and labels in a plain-text profile that matches your trading partner.
 
 ## Quick start (3 commands)
 
-You need Java 17 or newer (download `x12diff-0.2.3.jar` from the [Releases page](https://github.com/datawharf-tools/x12diff/releases/latest)), or use the Windows app image (`x12diff.exe`, runtime bundled).
+**Which download?** Both are on the [Releases page](https://github.com/datawharf-tools/x12diff/releases/latest). No Java on your PC: take the Windows zip (about 57 MB, Java is bundled). Java 17 or newer already installed: the 2 MB jar is enough.
+
+**Java check (jar only).** Run `java -version`. It must report 17 or newer. If Java is missing or older, install a free Java 17 or 21 (Eclipse Temurin, at adoptium.net), or use the Windows zip instead.
 
 ```
-java -jar x12diff-0.2.3.jar gen --members 300 --old old.834 --new new.834 --seed 3
-java -jar x12diff-0.2.3.jar diff old.834 new.834 --csv changes.csv
-java -jar x12diff-0.2.3.jar parse new.834
+java -jar x12diff-0.2.4.jar gen --members 300 --old old.834 --new new.834 --seed 3
+java -jar x12diff-0.2.4.jar diff old.834 new.834 --csv changes.csv
+java -jar x12diff-0.2.4.jar parse new.834
 ```
 
-The first command writes a fake old/new pair (no real data is ever used). The second compares them and writes `changes.csv`; it exits with code 1 when it finds differences, which is expected (see exit codes below). The third summarizes a file. Replace the fake files with your own to use it for real. For 835 and 837 files, generate a synthetic set with `java -jar x12diff-0.2.3.jar gen --kind claims --claims 200 --dir demo --seed 4`, then:
+The first command writes a fake old/new pair (no real data is ever used). The second compares them and writes `changes.csv`; it exits with code 1 when it finds differences, which is expected (see exit codes below). The third summarizes a file. Replace the fake files with your own to use it for real. For 835 and 837 files, generate a synthetic set with `java -jar x12diff-0.2.4.jar gen --kind claims --claims 200 --dir demo --seed 4`, then:
 
 ```
-java -jar x12diff-0.2.3.jar remit demo/remits_1.835 demo/remits_2.835 --csv lines.csv
-java -jar x12diff-0.2.3.jar recon demo --csv recon.csv
+java -jar x12diff-0.2.4.jar remit demo/remits_1.835 demo/remits_2.835 --csv lines.csv
+java -jar x12diff-0.2.4.jar recon demo --csv recon.csv --show 0
 ```
+
+`recon` also prints the first 20 claims that are not PAID (status, claim ID, charge, why); `--show 0` hides that listing and the warnings detail, `--show N` sets how many lines to print.
+
+### Windows zip (no Java needed)
+
+1. Download `x12diff-0.2.4-windows-x64.zip` from the Releases page. In PowerShell, check the download: `Get-FileHash .\x12diff-0.2.4-windows-x64.zip -Algorithm SHA256` (or `certutil -hashfile x12diff-0.2.4-windows-x64.zip SHA256` in Command Prompt). The value must equal the SHA-256 in the release notes.
+2. Right-click the zip, Extract All. You get a folder named `x12diff`. Keep everything in it together.
+3. Open PowerShell or Command Prompt in the folder that contains `x12diff` and run the same commands, with the exe in place of `java -jar x12diff-0.2.4.jar`:
+
+```
+.\x12diff\x12diff.exe gen --members 300 --old old.834 --new new.834 --seed 3
+.\x12diff\x12diff.exe diff old.834 new.834 --csv changes.csv
+.\x12diff\x12diff.exe parse new.834
+```
+
+Typing just `x12diff` works only after you add the `x12diff` folder to your PATH (Windows Settings, search for "environment variables", edit the user variable Path). Until then use the full path as above.
+
+The exe is not code-signed, so Windows SmartScreen may show "Windows protected your PC" the first time. Only continue (More info, Run anyway) when the SHA-256 from step 1 matches the release notes. The app makes no network connections. Its Java heap is capped at 512 MB, which is enough for the 1,000,000-member and 1,000,000-claim runs above.
 
 ## Running it: options and exit codes
 
-You need Java 17 or newer (the jar is built for Java 17 and also runs on 21), or use the Windows app image (`x12diff.exe`, runtime bundled).
+You need Java 17 or newer (the jar is built for Java 17 and also runs on 21), or use the Windows zip (runtime bundled; see above).
 
 ```
-java -jar x12diff-0.2.3.jar parse enrollment.834
-java -jar x12diff-0.2.3.jar diff last_month.834 this_month.834 --csv changes.csv
-java -jar x12diff-0.2.3.jar diff old.834 new.834 --profile my-profile.properties
+java -jar x12diff-0.2.4.jar parse enrollment.834
+java -jar x12diff-0.2.4.jar diff last_month.834 this_month.834 --csv changes.csv
+java -jar x12diff-0.2.4.jar diff old.834 new.834 --profile my-profile.properties
 ```
 
 Exit codes: `0` ok (`diff`: no differences), `1` `diff` found differences, `2` error, `3` input incomplete or inconsistent (also for `parse`: an empty file, a missing trailer or a count mismatch; `parse --allow-incomplete` returns 0). Errors print a one-line message, never a stack trace.
 
 **Incomplete input.** `diff`, `remit` and `recon` check the envelopes of every file they read. A missing SE, GE or IEA (for example after a cut-off transfer), or a segment-count or control-number mismatch, prints a loud `INPUT INCOMPLETE OR INCONSISTENT` notice on the console and on stderr, and the command exits with `3`. The report is still written, but do not trust it. Pass `--allow-incomplete` to accept such files knowingly. The notice goes to both stdout and stderr on purpose, so it survives redirecting either one; in a terminal you see it twice.
+
+**Empty input.** If `diff` reads a file with no members (an empty file, a file that is not an 834, lowercase segment IDs, or a `member.start` that does not match), it prints `EMPTY INPUT: new file has 0 members` (or `old file`) and exits with `3`, because every member of the other file would otherwise show as ADDED or TERMED. `--allow-incomplete` accepts it knowingly. An empty file gives exit code 3 in both `diff` and `parse`.
+
+**Output files.** CSV files are written under a temporary name and renamed when the run succeeds. A run that fails (out of memory, a bad input file) leaves no half-written CSV, and an existing CSV of the same name is left untouched. Naming the same file for two outputs (`--csv x.csv --rollup x.csv`, `gen --old o --new o`), or an output that is also an input, is an error (exit 2).
 
 Options for `diff`: `--csv FILE`, `--profile FILE`, `--mode full|change` (see below), `--show N` (changes echoed to the console, default 20), `--stats` (elapsed time and heap use), `--allow-incomplete`.
 
@@ -139,9 +163,11 @@ Only codes are shown. To get readable text in the rollup, add `adjlabel.CO-45 = 
 ## Recon: claims, payments and the 999/277CA trace
 
 ```
-x12diff recon claims.837 remits_1.835 remits_2.835 ack.999 status.277 --asof 20260601 --csv recon.csv
+x12diff recon claims.837 remits_1.835 remits_2.835 ack.999 status.277 --asof 20260601 --csv recon.csv --show 0
 x12diff recon "C:/month-end" --csv recon.csv
 ```
+
+Without `--show 0`, `recon` also prints a `First 20 non-PAID rows:` listing (one line per claim that is not PAID, with its charge, paid amount and reject source) before the warnings. `--show N` changes the number of lines; `--show 0` leaves the listing out of the console (the CSV always has every row).
 
 Files can be given in any order, or as folders. x12diff recognizes the transaction type inside each file (837, 835, 999 or 997, 277), so you can mix them. Synthetic output (`x12diff recon demo --asof 20260601`):
 
@@ -172,6 +198,7 @@ How claims are classified:
 - REJECTED before adjudication, only when no remit exists:
   - a 999 or 997 rejected the claim's transaction set (IK5 or AK5 element 1 in `recon.ack.reject.codes`, default R, M, W, X; AK9 rejects a whole group). The 999 is tied to the 837 by GS06 and ST02, the version in AK1-03 against GS08, and the date: the 999's GS04 must be on or after the 837's GS04 and within `recon.ack.window.days` (default 30), otherwise nothing is marked and a warning says so. If several 837 sets still match, the sender and receiver in the GS segments, then the file name (`jan.837` with `jan.999`), then the most recent 837 sent before the acknowledgement decide, so a resubmission that reused the same control numbers is resolved to the newer set; the row's `detail` says when the file name was used. If more than one candidate is left, nothing is marked and a warning says why, naming whether the date check or the version check failed. These checks make a wrong match unlikely but cannot rule it out when two sets share every identifier and date; keep one month per folder if in doubt;
   - or a 277CA claim-level status has a category in `recon.status.reject.categories` (default A3, A4, A6, A7, A8; claims are tied by the patient control number in TRN02, and by the charge in STC04 if the ID is duplicated; the 277CA's BHT04 (or GS04) must also be on or after the 837 date and within the same window). Service-line statuses are ignored. The newest status (by STC02 date) wins, and an acceptance (`recon.status.accept.categories`, default A0, A1, A2) clears an earlier rejection. On the same date an acceptance wins.
+  - or a TA1 (interchange acknowledgement) rejected the interchange the claim was sent in: TA104 is `R` (profile `recon.ta1.reject.codes`, default `R`). TA101 holds the ISA13 control number of the 837's interchange, so every claim in that interchange is REJECTED with `reject_source` `TA1 interchange rejected` and the TA105 note code in `detail`. If several interchanges share that ISA13, the sender and receiver in the ISA segments, then the file name, decide; if it is still ambiguous, or no 837 has that ISA13, nothing is marked and a warning says so. TA104 `E` (accepted with errors) is not treated as a rejection by default: the claims are not marked and a warning names the interchange (add `E` to `recon.ta1.reject.codes` to treat it as one). TA104 `A` is silent. A TA1 is never ignored silently.
 - ORPHAN: an 835 entry with no matching 837 claim.
 
 `recon.csv` has one row per claim, then the orphans: `status, claim_id, claim_charge, remit_charge, paid, patient_resp, claim_date, age_days, reject_source, detail`.
@@ -201,12 +228,12 @@ CSV files are written as UTF-8 with a byte-order mark (BOM), so Excel shows acce
 
 `x12diff gen --members N --old OLD --new NEW [--seed S] [--newlines] [--sets K]` writes a fake old/new pair with names like `TESTPERSON0000001`, IDs starting `SUB` or `999`, and phone numbers 800-555-0100 to 800-555-0199, which are reserved for fiction. About 1 percent of members are removed, 1 percent flagged by code, 1 percent flagged by date, 2 percent have an address change, 1 percent a line change, and 1 percent are added. It prints the expected counts so you can check the diff. The files are full files (BGN08 = 4). No real data is ever used or needed.
 
-`x12diff gen --kind claims --claims N --dir DIR [--seed S] [--newlines] [--set-size K]` writes a consistent `claims.837`, `remits_1.835`, `remits_2.835` (reversals and repayments), `ack.999` and `status.277`, with claim IDs like `PCN00000001` and no names at all. It prints the counts that `recon` should report. The 999 and 277 mirror the GS sender and receiver of the 837. The synthetic reversal checks may net to a negative total, which a real check would not.
+`x12diff gen --kind claims --claims N --dir DIR [--seed S] [--newlines] [--set-size K] [--reject-set N]...` writes a consistent `claims.837`, `remits_1.835`, `remits_2.835` (reversals and repayments), `ack.999` and `status.277`, with claim IDs like `PCN00000001` and no names at all. It prints the counts that `recon` should report. The 999 and 277 mirror the GS sender and receiver of the 837. By default about 5 percent of the 837 sets are rejected by the 999, chosen by the seed. `--reject-set N` (repeatable, 1 is the first set) makes the 999 reject exactly those sets instead (their claims get no remit); for example `--claims 200 --reject-set 2` rejects claims 41 to 80. The synthetic reversal checks may net to a negative total, which a real check would not.
 
 ## Build
 
 ```
-./gradlew test jar          # build/libs/x12diff.jar
+./gradlew test jar          # build/libs/x12diff.jar (79 tests)
 ./gradlew appImage          # build/jpackage/x12diff/x12diff.exe (needs a JDK with jpackage)
 ```
 
