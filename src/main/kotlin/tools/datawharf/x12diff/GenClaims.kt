@@ -269,9 +269,9 @@ object GenClaims {
         var rejectedSets = 0
         for (s in 0 until setCount) {
             d999.seg("AK2*837*" + (s + 1).toString().padStart(4, '0') + "*005010X222A1")
-            if (setRejected[s]) { rejectedSets++; d999.seg("IK3*CLM*14*2300*8"); d999.seg("IK4*2*1028*7*NOTAVALIDID"); d999.seg("IK5*R*5") } else d999.seg("IK5*A")
+            if (setRejected[s]) { rejectedSets++; d999.seg("IK3*CLM*3*2300*8"); d999.seg("IK4*1*1028*7*" + id(s.toLong() * setSize + 1)); d999.seg("IK5*R*5") } else d999.seg("IK5*A")
         }
-        d999.seg("AK9*" + (if (rejectedSets == 0) "A" else "P") + "*$setCount*$setCount*${setCount - rejectedSets}")
+        d999.seg("AK9*" + (if (rejectedSets == 0) "A" else if (rejectedSets == setCount) "R" else "P") + "*$setCount*$setCount*${setCount - rejectedSets}")
         d999.se()
         d999.close()
 

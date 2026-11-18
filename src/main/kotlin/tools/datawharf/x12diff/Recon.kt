@@ -7,7 +7,7 @@ import java.util.TreeMap
 
 private class SetRef(
     val id: Int, val fileIdx: Int, val isa13: String, val gs02: String, val gs03: String, val gs06: String, val st02: String,
-    val gsDate: Long?, val gs08: String, val isaSnd: String = "", val isaRcv: String = "",
+    val gsDate: Long?, val gs08: String, val isaSnd: String = "", val isaRcv: String = "", val isaDate: String = "", val isaTime: String = "",
 ) {
     val group: String get() = "$fileIdx|$isa13|$gs06"
     /** One interchange: the file, its ISA13, and its sender/receiver. */
@@ -111,7 +111,7 @@ object ReconCmd {
             override fun begin(type: String, st: Segment, gs: Segment?, d: Delimiters, file: String) {
                 setId = sets.size
                 val ref = SetRef(setId, fileIdx, isa13 = curIsa, gs02 = gs?.el(2) ?: "", gs03 = gs?.el(3) ?: "", gs06 = gs?.el(6) ?: "", st02 = st.el(2),
-                    gsDate = Dates.days(gs?.el(4) ?: ""), gs08 = gs?.el(8) ?: "", isaSnd = curSnd, isaRcv = curRcv)
+                    gsDate = Dates.days(gs?.el(4) ?: ""), gs08 = gs?.el(8) ?: "", isaSnd = curSnd, isaRcv = curRcv, isaDate = curDate, isaTime = curTime)
                 sets.add(ref)
                 byIsa.getOrPut(ref.isa13) { ArrayList() }.add(ref)
                 byGsSt.getOrPut("${ref.gs06}|${ref.st02}") { ArrayList() }.add(ref)
@@ -124,6 +124,8 @@ object ReconCmd {
             var curIsa = ""
             var curSnd = ""
             var curRcv = ""
+            var curDate = ""
+            var curTime = ""
 
             private fun flush() {
                 val id = cur ?: return
@@ -169,10 +171,10 @@ object ReconCmd {
         }
         for ((i, f) in files.withIndex()) {
             fileIdx = i
-            h837.curIsa = ""; h837.curSnd = ""; h837.curRcv = ""
+            h837.curIsa = ""; h837.curSnd = ""; h837.curRcv = ""; h837.curDate = ""; h837.curTime = ""
             val chk = EnvelopeChecker()
             TxWalker.walk(f, mapOf("837" to h837), chk) { s ->
-                if (s.id == "ISA") { h837.curIsa = s.el(13); h837.curSnd = s.el(6).trim(); h837.curRcv = s.el(8).trim() }
+                if (s.id == "ISA") { h837.curIsa = s.el(13); h837.curSnd = s.el(6).trim(); h837.curRcv = s.el(8).trim(); h837.curDate = s.el(9); h837.curTime = s.el(10) }
             }
             sum.envelope.add(f.fileName.toString(), chk)
         }
@@ -400,7 +402,12 @@ object ReconCmd {
                 addWarn("$fname: TA1 ${if (isReject) "rejected" else "accepted with errors"} interchange $ctl (TA104 $code$noteText) but no 837 with that ISA13 is in the input; nothing was marked")
                 return
             }
-            var c: List<SetRef> = cands
+            // TA102/TA103 repeat the interchange date and time (ISA09/ISA10) of the interchange being answered.
+            var c: List<SetRef> = cands.filter { it.isaDate == t.el(2) && (t.el(3).isEmpty() || it.isaTime == t.el(3)) }
+            if (c.isEmpty()) {
+                addWarn("$fname: TA1 ${if (isReject) "rejected" else "accepted with errors"} interchange $ctl (TA104 $code$noteText), but no 837 interchange with that control number has the date ${t.el(2)} and time ${t.el(3)}; nothing was marked")
+                return
+            }
             if (c.map { it.interchange }.distinct().size > 1) {
                 val m = c.filter { (it.isaSnd == ackRcv && it.isaRcv == ackSnd) || (it.isaSnd == ackSnd && it.isaRcv == ackRcv) }
                 if (m.isNotEmpty() && m.size < c.size) c = m

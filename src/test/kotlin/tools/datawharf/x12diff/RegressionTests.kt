@@ -826,3 +826,76 @@ class Release024Tests {
         assertEquals(0, cli("diff", plain.toString(), z.toString()).code)
     }
 }
+
+/** Tests for the release-gate fixes. */
+class Release024GateTests {
+    private fun claimFile(d: Path, name: String, isactl: String, date: String, vararg ids: String): Path {
+        val t = env(f837(ids.map { Triple(it, "100", "20260105") }, bht = "20260105"), isactl = isactl, fid = "HC", gsver = "005010X222A1")
+        return write(d, name, t.substring(0, 106).replace("*260101*", "*$date*") + t.substring(106))
+    }
+
+    private fun ta1(d: Path, name: String, vararg t: String): Path =
+        write(d, name, isa("000000099") + t.joinToString("") { "$it~" } + "IEA*0*000000099~")
+
+    @Test
+    fun h1_folderOfManyFilesIsLinearAndDuplicateInputsAreNamed() = inTemp { d ->
+        val dir = Files.createDirectory(d.resolve("many"))
+        val one = f835(listOf("CLP*C1*1*100*90*10*12", "CAS*CO*45*10"), "90")
+        for (i in 1..400) write(dir, "r%04d.835".format(i), env(one, fid = "HP"))
+        val t0 = System.nanoTime()
+        val r = cli("remit", dir.toString(), "--show", "0")
+        val secs = (System.nanoTime() - t0) / 1e9
+        assertEquals(0, r.code, r.out + r.err)
+        assertTrue(secs < 20, "took $secs s")
+        // the same file named twice, and a file named again inside its folder
+        val f = dir.resolve("r0001.835").toString()
+        val twice = cli("remit", f, f)
+        assertEquals(2, twice.code); assertTrue("is given twice" in twice.err, twice.err)
+        val inside = cli("remit", dir.toString(), f)
+        assertEquals(2, inside.code); assertTrue("also inside folder" in inside.err, inside.err)
+        // an output that is also an input is still refused, in one pass
+        val out = cli("remit", dir.toString(), "--csv", f)
+        assertEquals(2, out.code); assertTrue("same file" in out.err, out.err)
+    }
+
+    @Test
+    fun m1_ta1MustMatchTheInterchangeDateAndTime() = inTemp { d ->
+        val feb = claimFile(d, "feb.837", "000000001", "260201", "FEB1")
+        val jan = claimFile(d, "jan.837", "000000001", "260101", "JAN1")
+        val ta = ta1(d, "jan.ta1", "TA1*000000001*260101*1200*R*024")
+        val s = recon(listOf(feb, ta))
+        assertEquals(null, s.counts["REJECTED"], s.counts.toString())
+        assertTrue(s.warnings.any { "nothing was marked" in it && "date 260101" in it }, s.warnings.toString())
+        val both = recon(listOf(feb, jan, ta))
+        assertEquals(1L, both.counts["REJECTED"])
+        val csv = d.resolve("o.csv")
+        recon(listOf(feb, jan, ta), csv = csv)
+        val rows = Files.readAllLines(csv).filter { "REJECTED" in it }
+        assertEquals(1, rows.size); assertTrue("JAN1" in rows[0], rows.toString())
+        // a different time of day does not match either
+        val late = ta1(d, "late.ta1", "TA1*000000001*260101*1300*R*024")
+        assertEquals(null, recon(listOf(jan, late)).counts["REJECTED"])
+    }
+
+    @Test
+    fun m2_deviceTargetsAreWrittenDirectly() = inTemp { d ->
+        val r835 = write(d, "r.835", env(f835(listOf("CLP*C1*1*100*90*10*12", "CAS*CO*45*10"), "90"), fid = "HP"))
+        val nul = if (System.getProperty("os.name", "").startsWith("Windows")) "NUL" else "/dev/null"
+        val r = cli("remit", r835.toString(), "--csv", nul)
+        assertEquals(0, r.code, r.out + r.err)
+        assertEquals(0L, Files.list(d).use { st -> st.filter { it.fileName.toString().contains("tmp") }.count() })
+    }
+
+    @Test
+    fun l1_l2_rejectedSetCarriesRealPositionsAndAk9Code() = inTemp { d ->
+        val dir = d.resolve("g")
+        assertEquals(0, cli("gen", "--kind", "claims", "--claims", "200", "--dir", dir.toString(), "--reject-set", "2", "--newlines").code)
+        val ack = Files.readString(dir.resolve("ack.999"))
+        assertTrue("IK3*CLM*3*2300*8~" in ack && "IK4*1*1028*7*PCN00000041~" in ack && "AK9*P*5*5*4~" in ack, ack)
+        val st = Files.readString(dir.resolve("claims.837")).lines()
+        assertTrue(st[st.indexOfFirst { it.startsWith("ST*837*0002") } + 2].startsWith("CLM*PCN00000041*"))
+        val all = d.resolve("h")
+        assertEquals(0, cli("gen", "--kind", "claims", "--claims", "40", "--dir", all.toString(), "--reject-set", "1").code)
+        assertTrue("AK9*R*1*1*0~" in Files.readString(all.resolve("ack.999")))
+    }
+}

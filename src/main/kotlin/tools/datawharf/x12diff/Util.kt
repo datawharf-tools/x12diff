@@ -73,6 +73,16 @@ object Csv {
         if (Files.isDirectory(target)) throw X12Exception("Cannot write '$path': it is a folder, not a file name")
         val dir = target.toAbsolutePath().parent
         if (dir != null && !Files.isDirectory(dir)) throw X12Exception("Cannot write '$path': the folder does not exist")
+        // Devices and pipes (NUL, /dev/null, /dev/stdout) cannot be replaced by a rename: write to them directly.
+        if ((Files.exists(target) && !Files.isRegularFile(target)) || isWindowsDevice(target)) {
+            try {
+                val w = Files.newBufferedWriter(target, StandardCharsets.UTF_8)
+                w.write("\uFEFF")
+                return OutFile(path, target, null, w)
+            } catch (e: IOException) {
+                throw X12Exception("Cannot write '$path': ${ioReason(e)}")
+            }
+        }
         val tmp = (dir ?: target.toAbsolutePath()).resolve("." + target.fileName.toString() + ".x12diff-tmp")
         try {
             val w = Files.newBufferedWriter(tmp, StandardCharsets.UTF_8)
@@ -93,7 +103,7 @@ fun ioReason(e: IOException): String = when (e) {
 }
 
 /** An output file written via a temporary name; see [Csv.open]. */
-class OutFile(private val label: String, private val target: Path, private val tmp: Path, val w: BufferedWriter) {
+class OutFile(private val label: String, private val target: Path, private val tmp: Path?, val w: BufferedWriter) {
     private var done = false
 
     fun commit() {
@@ -101,9 +111,9 @@ class OutFile(private val label: String, private val target: Path, private val t
         done = true
         try {
             w.close()
-            Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            if (tmp != null) Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
         } catch (e: IOException) {
-            try { Files.deleteIfExists(tmp) } catch (_: IOException) {}
+            try { if (tmp != null) Files.deleteIfExists(tmp) } catch (_: IOException) {}
             throw X12Exception("Cannot write '$label': ${ioReason(e)}")
         }
     }
@@ -113,7 +123,7 @@ class OutFile(private val label: String, private val target: Path, private val t
         if (done) return
         done = true
         try { w.close() } catch (_: IOException) {}
-        try { Files.deleteIfExists(tmp) } catch (_: IOException) {}
+        try { if (tmp != null) Files.deleteIfExists(tmp) } catch (_: IOException) {}
     }
 }
 
@@ -127,6 +137,48 @@ fun requireDistinct(vararg named: Pair<String, String?>) {
             if (sameFile(path, path2)) throw X12Exception("$label and $l2 name the same file ('$p'${if (p != p2) " and '$p2'" else ""}); use different file names")
         }
         seen.add(Triple(label, p, path))
+    }
+}
+
+/** NUL, CON, PRN, AUX, COM1-9, LPT1-9 (with or without an extension): Files.exists() is false for them on Windows. */
+private fun isWindowsDevice(p: Path): Boolean {
+    if (!WINDOWS) return false
+    val n = (p.fileName?.toString() ?: return false).substringBefore('.').trim().uppercase()
+    return n in setOf("NUL", "CON", "PRN", "AUX") || Regex("(COM|LPT)[1-9]").matches(n)
+}
+
+private val WINDOWS = System.getProperty("os.name", "").startsWith("Windows")
+
+/** Lookup keys for a path: its absolute normalized form and, when it exists, its real path (lower-cased on Windows). */
+private fun pathKeys(p: Path): List<String> {
+    val keys = ArrayList<String>(2)
+    keys.add(p.toAbsolutePath().normalize().toString())
+    try { if (Files.exists(p)) keys.add(p.toRealPath().toString()) } catch (_: IOException) {}
+    return if (WINDOWS) keys.map { it.lowercase() } else keys
+}
+
+/**
+ * For remit and recon: checks the outputs against each other and against the inputs, and refuses an input that is
+ * named twice (for example as a file and again inside a folder). One pass over the inputs, so a folder of
+ * thousands of files stays fast.
+ */
+fun checkOutputsAndInputs(outputs: List<Pair<String, String?>>, args: List<String>, files: List<Path>) {
+    requireDistinct(*outputs.toTypedArray())
+    val outKeys = HashMap<String, String>()
+    for ((label, p) in outputs) if (p != null) for (k in pathKeys(safePath(p))) outKeys[k] = label
+    val seen = HashMap<String, Path>()
+    for (f in files) {
+        val keys = pathKeys(f)
+        for (k in keys) outKeys[k]?.let { throw X12Exception("$it and the input file '$f' name the same file; use a different output name") }
+        val prior = seen[keys.last()]
+        if (prior != null) {
+            val folder = args.firstOrNull { a ->
+                val ap = try { safePath(a) } catch (_: X12Exception) { null }
+                ap != null && Files.isDirectory(ap) && pathKeys(ap).last() == pathKeys(f.toAbsolutePath().parent).last()
+            }
+            throw X12Exception("'$f' is given twice" + (if (folder != null) " (also inside folder '$folder')" else " (for example as a file and by a wildcard or folder)") + "; list each file once")
+        }
+        seen[keys.last()] = f
     }
 }
 
