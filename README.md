@@ -19,7 +19,7 @@ Page and Pro waitlist: https://datawharftools.com/x12/
 
 ## Why use it
 
-- It streams. Memory depends on the number of members (diff) or claims (recon), not on file size. On a desktop PC (24-thread Intel Core Ultra 9, 64 GB RAM, other programs running) we measured, on synthetic files: two 260 MB 834 files (1,000,000 members each) compared in about 8 seconds (the jar with Java's default heap used about 1.7 GB; the Windows app, capped at 512 MB, took about the same time), and a 1,000,000-claim 837/835/999/277 set (about 300 MB) reconciled in about 8 seconds. Flattening its 144 MB of 835 remits took about 3 seconds. A slower or busier PC takes longer: one run on a heavily loaded PC took about 36 seconds for the diff. Your files and hardware will differ.
+- It streams. Memory depends on the number of members (diff) or claims (recon), not on file size. On a desktop PC (24-thread Intel Core Ultra 9, 64 GB RAM, other programs running) we measured, on synthetic files: two 260 MB 834 files (1,000,000 members each) compared in 7 to 13 seconds across several runs (the jar with Java's default heap used about 1.7 GB; the Windows app, capped at 512 MB, took 8 to 10 seconds), and a 1,000,000-claim 837/835/999/277 set (about 300 MB) reconciled in about 8 seconds. Flattening its 144 MB of 835 remits took about 3 seconds. A slower or busier PC takes longer: one run on a heavily loaded PC took about 36 seconds for the diff. Your files and hardware will differ.
 - **Privacy: x12diff runs entirely on your machine and makes no network connections.** It has no telemetry, no update check and no network code. It reads the files you name and writes the CSV you ask for.
 - It checks envelopes (SE, GE, IEA, control numbers) and refuses to give you a quiet wrong answer from a cut-off file: it exits with code 3 and a loud notice.
 - It ships no implementation-guide text. You set member keys, termination codes and labels in a plain-text profile that matches your trading partner.
@@ -233,7 +233,7 @@ CSV files are written as UTF-8 with a byte-order mark (BOM), so Excel shows acce
 ## Build
 
 ```
-./gradlew test jar          # build/libs/x12diff.jar (79 tests)
+./gradlew test jar          # build/libs/x12diff.jar (83 tests)
 ./gradlew appImage          # build/jpackage/x12diff/x12diff.exe (needs a JDK with jpackage)
 ```
 
