@@ -111,7 +111,17 @@ class OutFile(private val label: String, private val target: Path, private val t
         done = true
         try {
             w.close()
-            if (tmp != null) Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            if (tmp != null) {
+                try {
+                    Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                } catch (e: IOException) {
+                    // Windows 10 and older treat names like nul.csv as the NUL device, which a rename cannot
+                    // replace: copy into the device instead. Windows 11 treats them as ordinary files.
+                    if (!hasReservedBaseName(target) || Files.isRegularFile(target)) throw e
+                    Files.newOutputStream(target).use { out -> Files.copy(tmp, out) }
+                    Files.deleteIfExists(tmp)
+                }
+            }
         } catch (e: IOException) {
             try { if (tmp != null) Files.deleteIfExists(tmp) } catch (_: IOException) {}
             throw X12Exception("Cannot write '$label': ${ioReason(e)}")
@@ -140,11 +150,24 @@ fun requireDistinct(vararg named: Pair<String, String?>) {
     }
 }
 
-/** NUL, CON, PRN, AUX, COM1-9, LPT1-9 (with or without an extension): Files.exists() is false for them on Windows. */
-private fun isWindowsDevice(p: Path): Boolean {
+private val RESERVED = Regex("NUL|CON|PRN|AUX|(COM|LPT)[1-9]")
+
+/**
+ * Exactly NUL, CON, PRN, AUX, COM1-9 or LPT1-9 (no extension; trailing dots and spaces ignored, as Windows does).
+ * Files.exists() is false for these devices on Windows, so they are written directly. A name with an extension,
+ * such as nul.csv, is an ordinary file on Windows 11 and keeps the temp-then-rename protection.
+ */
+internal fun isWindowsDevice(p: Path): Boolean {
+    if (!WINDOWS) return false
+    val n = (p.fileName?.toString() ?: return false).trimEnd('.', ' ').uppercase()
+    return RESERVED.matches(n)
+}
+
+/** A reserved device name followed by an extension (nul.csv, Com1.txt): a device on Windows 10 and older. */
+internal fun hasReservedBaseName(p: Path): Boolean {
     if (!WINDOWS) return false
     val n = (p.fileName?.toString() ?: return false).substringBefore('.').trim().uppercase()
-    return n in setOf("NUL", "CON", "PRN", "AUX") || Regex("(COM|LPT)[1-9]").matches(n)
+    return RESERVED.matches(n)
 }
 
 private val WINDOWS = System.getProperty("os.name", "").startsWith("Windows")

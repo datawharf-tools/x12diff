@@ -651,7 +651,7 @@ class RegressionTests {
     fun le_pairingCutoffNoticeIsAWarning() {
         val src = Files.readString(Path.of("src", "main", "kotlin", "tools", "datawharf", "x12diff", "Diff.kt"))
         assertTrue("WARNING: more than 100,000 ADDED members" in src)
-        assertEquals("0.2.4", VERSION)
+        assertEquals("0.2.5", VERSION)
     }
 }
 
@@ -897,5 +897,32 @@ class Release024GateTests {
         val all = d.resolve("h")
         assertEquals(0, cli("gen", "--kind", "claims", "--claims", "40", "--dir", all.toString(), "--reject-set", "1").code)
         assertTrue("AK9*R*1*1*0~" in Files.readString(all.resolve("ack.999")))
+    }
+}
+
+/** Tests for the 0.2.5 release. */
+class Release025Tests {
+    @Test
+    fun deviceDetectionNeedsTheWholeName() {
+        val win = System.getProperty("os.name", "").startsWith("Windows")
+        for (n in listOf("NUL", "nul", "Con", "COM1", "lpt9", "NUL.")) assertEquals(win, isWindowsDevice(Path.of(n)), n)
+        for (n in listOf("nul.csv", "Nul.txt", "con.csv", "com1.csv", "NULL", "COM0", "COM10", "x.csv")) assertFalse(isWindowsDevice(Path.of(n)), n)
+        for (n in listOf("nul.csv", "Com1.txt")) assertEquals(win, hasReservedBaseName(Path.of(n)), n)
+        assertFalse(hasReservedBaseName(Path.of("annual.csv")))
+    }
+
+    @Test
+    fun reservedBaseNameKeepsTheTempFileProtection() = inTemp { d ->
+        val csv = d.resolve("nul.csv")
+        try { Files.writeString(csv, "keep me") } catch (e: java.io.IOException) { return@inTemp }
+        // On Windows 10 and older nul.csv is the NUL device; only test where it is a real file (Windows 11, Linux, macOS).
+        if (!Files.isRegularFile(csv) || Files.readString(csv) != "keep me") return@inTemp
+        val o = write(d, "o.834", f834(listOf(member("SUBA", "MA"))))
+        val bad = write(d, "bad.834", "not x12 at all")
+        assertEquals(2, cli("diff", o.toString(), bad.toString(), "--csv", csv.toString()).code)
+        assertEquals("keep me", Files.readString(csv))
+        assertEquals(0, cli("diff", o.toString(), o.toString(), "--csv", csv.toString()).code)
+        assertTrue(Files.readString(csv).contains("change_type"))
+        assertEquals(0L, Files.list(d).use { st -> st.filter { it.fileName.toString().contains("x12diff-tmp") }.count() })
     }
 }
