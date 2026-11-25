@@ -19,4 +19,4 @@ Two new remit outputs and a free Excel workbook. Existing commands and outputs a
 SHA-256:
 - `x12diff-0.2.6.jar`: 662bd68a192fd801f7f458face5031cbf28f408ad26a403dfcdfa91b27e8c0f9
 - `x12diff-0.2.6-windows-x64.zip`: bdf1bc4c1c84d2852f6712f458286da9f93d97c1bfec8563294cb8935797d447
-- `x12diff-remit-workbook.xlsx`: 71ec38416b27304d345427a175b4c6a3e445ae1053a8a0004cd4cb152a1df177
+- `x12diff-remit-workbook.xlsx`: b7dd0d1f76e5c84568d1b0e99bc09e4a5b6c8b2efd39686ac3d89f663543e090
