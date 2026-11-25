@@ -31,25 +31,25 @@ Page and Pro waitlist: https://datawharftools.com/x12/
 **Java check (jar only).** Run `java -version`. It must report 17 or newer. If Java is missing or older, install a free Java 17 or 21 (Eclipse Temurin, at adoptium.net), or use the Windows zip instead.
 
 ```
-java -jar x12diff-0.2.5.jar gen --members 300 --old old.834 --new new.834 --seed 3
-java -jar x12diff-0.2.5.jar diff old.834 new.834 --csv changes.csv
-java -jar x12diff-0.2.5.jar parse new.834
+java -jar x12diff-0.2.6.jar gen --members 300 --old old.834 --new new.834 --seed 3
+java -jar x12diff-0.2.6.jar diff old.834 new.834 --csv changes.csv
+java -jar x12diff-0.2.6.jar parse new.834
 ```
 
-The first command writes a fake old/new pair (no real data is ever used). The second compares them and writes `changes.csv`; it exits with code 1 when it finds differences, which is expected (see exit codes below). The third summarizes a file. Replace the fake files with your own to use it for real. For 835 and 837 files, generate a synthetic set with `java -jar x12diff-0.2.5.jar gen --kind claims --claims 200 --dir demo --seed 4`, then:
+The first command writes a fake old/new pair (no real data is ever used). The second compares them and writes `changes.csv`; it exits with code 1 when it finds differences, which is expected (see exit codes below). The third summarizes a file. Replace the fake files with your own to use it for real. For 835 and 837 files, generate a synthetic set with `java -jar x12diff-0.2.6.jar gen --kind claims --claims 200 --dir demo --seed 4`, then:
 
 ```
-java -jar x12diff-0.2.5.jar remit demo/remits_1.835 demo/remits_2.835 --csv lines.csv
-java -jar x12diff-0.2.5.jar recon demo --csv recon.csv --show 0
+java -jar x12diff-0.2.6.jar remit demo/remits_1.835 demo/remits_2.835 --csv lines.csv
+java -jar x12diff-0.2.6.jar recon demo --csv recon.csv --show 0
 ```
 
 `recon` also prints the first 20 claims that are not PAID (status, claim ID, charge, why); `--show 0` hides that listing and the warnings detail, `--show N` sets how many lines to print.
 
 ### Windows zip (no Java needed)
 
-1. Download `x12diff-0.2.5-windows-x64.zip` from the Releases page. In PowerShell, check the download: `Get-FileHash .\x12diff-0.2.5-windows-x64.zip -Algorithm SHA256` (or `certutil -hashfile x12diff-0.2.5-windows-x64.zip SHA256` in Command Prompt). The value must equal the SHA-256 in the release notes.
+1. Download `x12diff-0.2.6-windows-x64.zip` from the Releases page. In PowerShell, check the download: `Get-FileHash .\x12diff-0.2.6-windows-x64.zip -Algorithm SHA256` (or `certutil -hashfile x12diff-0.2.6-windows-x64.zip SHA256` in Command Prompt). The value must equal the SHA-256 in the release notes.
 2. Right-click the zip, Extract All. You get a folder named `x12diff`. Keep everything in it together.
-3. Open PowerShell or Command Prompt in the folder that contains `x12diff` and run the same commands, with the exe in place of `java -jar x12diff-0.2.5.jar`:
+3. Open PowerShell or Command Prompt in the folder that contains `x12diff` and run the same commands, with the exe in place of `java -jar x12diff-0.2.6.jar`:
 
 ```
 .\x12diff\x12diff.exe gen --members 300 --old old.834 --new new.834 --seed 3
@@ -66,9 +66,9 @@ The exe is not code-signed, so Windows SmartScreen may show "Windows protected y
 You need Java 17 or newer (the jar is built for Java 17 and also runs on 21), or use the Windows zip (runtime bundled; see above).
 
 ```
-java -jar x12diff-0.2.5.jar parse enrollment.834
-java -jar x12diff-0.2.5.jar diff last_month.834 this_month.834 --csv changes.csv
-java -jar x12diff-0.2.5.jar diff old.834 new.834 --profile my-profile.properties
+java -jar x12diff-0.2.6.jar parse enrollment.834
+java -jar x12diff-0.2.6.jar diff last_month.834 this_month.834 --csv changes.csv
+java -jar x12diff-0.2.6.jar diff old.834 new.834 --profile my-profile.properties
 ```
 
 Exit codes: `0` ok (`diff`: no differences), `1` `diff` found differences, `2` error, `3` input incomplete or inconsistent (also for `parse`: an empty file, a missing trailer or a count mismatch; `parse --allow-incomplete` returns 0). Errors print a one-line message, never a stack trace.
@@ -168,6 +168,16 @@ Checks, reported as warnings with the check number and claim ID:
 An amount that is not a valid number (for example `100.005`) is never turned into 0.00. The CSV keeps the raw text, the amount is left out of the totals and counted in a warning, and the balance checks that depend on it are skipped.
 
 Only codes are shown. To get readable text in the rollup, add `adjlabel.CO-45 = your text` lines to a profile and pass `--profile`. x12diff ships no description text for any code.
+
+### Excel workbook (free)
+
+`x12diff-remit-workbook.xlsx` (on the Releases page) turns these files into an Overview, Denials, Claims, Adjustments and Lines view in Excel, using Power Query and pivots, with no macros. Run
+
+```
+x12diff remit FILES --claims claims.csv --adjustments adjustments.csv --csv lines.csv
+```
+
+into one folder, put that folder's path in the workbook's Start sheet and choose Data > Refresh All. It opens with a small synthetic sample. Tested in Excel for Microsoft 365 on Windows: about 15 s for 100,000 service lines.
 
 ## Recon: claims, payments and the 999/277CA trace
 

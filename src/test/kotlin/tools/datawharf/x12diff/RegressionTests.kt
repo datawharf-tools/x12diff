@@ -651,7 +651,7 @@ class RegressionTests {
     fun le_pairingCutoffNoticeIsAWarning() {
         val src = Files.readString(Path.of("src", "main", "kotlin", "tools", "datawharf", "x12diff", "Diff.kt"))
         assertTrue("WARNING: more than 100,000 ADDED members" in src)
-        assertEquals("0.2.5", VERSION)
+        assertEquals("0.2.6", VERSION)
     }
 }
 

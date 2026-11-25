@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.6 (unreleased)
+## 0.2.6 (2026-11-25)
 
 - `remit --claims claims.csv`: one row per claim with line and adjustment totals per group (CO, PR, OA, PI, CR), `balance_diff`, `balance_ok`, `lines_paid_ok` and `has_invalid_amount`, so a workbook can load finished tables instead of grouping lines in Power Query.
 - `remit --adjustments adjustments.csv`: one row per adjustment (claim-level ones once per claim, line-level ones with the line number and service code).
