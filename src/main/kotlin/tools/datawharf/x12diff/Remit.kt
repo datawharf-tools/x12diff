@@ -4,7 +4,7 @@ import java.io.BufferedWriter
 import java.nio.file.Path
 import java.util.TreeMap
 
-class Adj(val group: String, val reason: String, val amount: Long, val qty: String) {
+class Adj(val group: String, val reason: String, val amount: Long, val qty: String, val raw: String = "") {
     val key: String get() = "$group-$reason"
     fun text(): String = "$group:$reason:${Money.fmt(amount)}"
 }
@@ -13,6 +13,8 @@ class Adj(val group: String, val reason: String, val amount: Long, val qty: Stri
 class RemitLine(
     val qual: String, val code: String, val modifiers: String, val units: String,
     val charge: Long?, val paid: Long?, val chargeText: String, val paidText: String, val adjs: List<Adj>,
+    /** CAS amounts that were not valid amounts (raw text kept in [Adj.raw]); they are not in [adjs]. */
+    val badAdjs: List<Adj> = emptyList(),
 )
 
 class CheckInfo(val file: String, val setCtl: String) {
@@ -35,6 +37,14 @@ class RemitClaim(
     val adjs: List<Adj>, val lines: List<RemitLine>,
     val chargeText: String, val paidText: String, val prText: String,
     val chargeOk: Boolean, val paidOk: Boolean, val prOk: Boolean,
+    /** Claim-level CAS amounts that were not valid amounts (not in [adjs]). */
+    val badAdjs: List<Adj> = emptyList(),
+    /** True when any amount in this claim (CLP, SVC or CAS) is not valid; the balance checks were then skipped. */
+    val hasInvalid: Boolean = false,
+    /** Charge - paid - adjustments, the value the balance warning reports; null when it could not be computed. */
+    val balanceDiff: Long? = null,
+    /** Result of the service-line paid check; null when it was not run (no lines, or an invalid amount). */
+    val linesPaidOk: Boolean? = null,
 ) {
     fun allAdjs(): Sequence<Adj> = adjs.asSequence() + lines.asSequence().flatMap { it.adjs.asSequence() }
 }
@@ -52,12 +62,14 @@ class RemitHandler(private val listener: RemitListener) : TxHandler {
 
     private class ClaimB(val seg: Segment) {
         val adjs = ArrayList<Adj>()
+        val badAdjs = ArrayList<Adj>()
         val lines = ArrayList<RemitLine>()
         var bad = false
     }
 
     private class SvcB(val seg: Segment) {
         val adjs = ArrayList<Adj>()
+        val badAdjs = ArrayList<Adj>()
     }
 
     private var cur: ClaimB? = null
@@ -101,6 +113,7 @@ class RemitHandler(private val listener: RemitListener) : TxHandler {
                     val amt = Money.parse(s.el(i + 1))
                     if (amt == null) {
                         c.bad = true
+                        (svc?.badAdjs ?: c.badAdjs).add(Adj(group, reason, 0L, s.el(i + 2), s.el(i + 1)))
                         listener.warn("${ci.label}, claim ${c.seg.el(1)}: CAS amount '${s.el(i + 1)}' is not a valid amount; balance not checked for this claim")
                     } else {
                         target.add(Adj(group, reason, amt, s.el(i + 2)))
@@ -148,7 +161,7 @@ class RemitHandler(private val listener: RemitListener) : TxHandler {
         c.lines.add(
             RemitLine(
                 parts.getOrElse(0) { "" }, parts.getOrElse(1) { "" }, parts.drop(2).joinToString(":"),
-                s.el(5), ch, pd, amountText(s.el(2), ch), amountText(s.el(3), pd), v.adjs,
+                s.el(5), ch, pd, amountText(s.el(2), ch), amountText(s.el(3), pd), v.adjs, v.badAdjs,
             )
         )
         svc = null
@@ -170,16 +183,20 @@ class RemitHandler(private val listener: RemitListener) : TxHandler {
         if (paidV != null) ci.sumPaid += paid else ci.unreliable = true
         ci.claims++
         val ok = chargeV != null && paidV != null && prV != null && !b.bad
+        var balanceDiff: Long? = null
+        var linesPaidOk: Boolean? = null
         if (ok) {
             // The balancing rule adds claim-level and line-level adjustments.
             val claimCas = b.adjs.sumOf { it.amount }
             val lineCas = b.lines.sumOf { l -> l.adjs.sumOf { it.amount } }
             val diff = charge - paid - claimCas - lineCas
+            balanceDiff = diff
             if (diff != 0L) {
                 listener.warn("$ctx: charge ${Money.fmt(charge)} - paid ${Money.fmt(paid)} - adjustments ${Money.fmt(claimCas + lineCas)} leaves ${Money.fmt(diff)} unexplained")
             }
             if (b.lines.isNotEmpty() && b.lines.all { it.paid != null }) {
                 val ls = b.lines.sumOf { it.paid!! }
+                linesPaidOk = !(ls != paid && ls - claimCas != paid)
                 if (ls != paid && ls - claimCas != paid) {
                     listener.warn("$ctx: service-line paid amounts add up to ${Money.fmt(ls)} but CLP04 is ${Money.fmt(paid)}")
                 }
@@ -190,6 +207,7 @@ class RemitHandler(private val listener: RemitListener) : TxHandler {
                 ci, id, s.el(2), charge, paid, pr, s.el(7), b.adjs, b.lines,
                 amountText(s.el(3), chargeV), amountText(s.el(4), paidV), amountText(s.el(5), prV),
                 chargeV != null, paidV != null, prV != null,
+                b.badAdjs, !ok, balanceDiff, linesPaidOk,
             )
         )
     }
@@ -239,11 +257,80 @@ object RemitCmd {
         "line_adjustments", "claim_adjustments",
     )
 
-    fun run(files: List<Path>, profile: Profile, csvPath: String?, rollupPath: String?): RemitSummary {
+    private val CLAIMS_HEADER = listOf(
+        "file", "check_number", "payment_date", "payer_id", "payee_id", "claim_id", "claim_status",
+        "claim_charge", "claim_paid", "patient_resp", "payer_claim_ctrl",
+        "line_count", "line_charge_total", "line_paid_total", "claim_adj_total", "line_adj_total",
+        "adj_CO", "adj_PR", "adj_OA", "adj_PI", "adj_CR", "balance_diff", "balance_ok", "lines_paid_ok", "has_invalid_amount",
+    )
+    private val ADJ_GROUPS = listOf("CO", "PR", "OA", "PI", "CR")
+    private val ADJ_HEADER = listOf("file", "check_number", "claim_id", "level", "line_no", "service_code", "group", "reason", "amount")
+
+    private fun yn(b: Boolean?): String = if (b == null) "" else if (b) "Y" else "N"
+
+    private fun writeClaimRow(w: BufferedWriter, c: RemitClaim) {
+        val n = c.lines.size
+        // Totals are blank when they cannot be trusted (an amount is empty or not valid) or when there are no lines.
+        val lineCharge = if (n > 0 && c.lines.all { it.charge != null }) Money.fmt(c.lines.sumOf { it.charge!! }) else ""
+        val linePaid = if (n > 0 && c.lines.all { it.paid != null }) Money.fmt(c.lines.sumOf { it.paid!! }) else ""
+        val lineBad = c.lines.any { it.badAdjs.isNotEmpty() }
+        val claimAdjTotal = if (c.badAdjs.isEmpty()) Money.fmt(c.adjs.sumOf { it.amount }) else ""
+        val lineAdjTotal = if (!lineBad) Money.fmt(c.lines.sumOf { l -> l.adjs.sumOf { it.amount } }) else ""
+        val badGroups = (c.badAdjs.asSequence() + c.lines.asSequence().flatMap { it.badAdjs.asSequence() }).map { it.group }.toSet()
+        val groupCells = ADJ_GROUPS.map { g ->
+            if (g in badGroups) "" else Money.fmt(c.allAdjs().filter { it.group == g }.sumOf { it.amount })
+        }
+        val diff = c.balanceDiff
+        w.write(
+            Csv.line(
+                listOf(
+                    c.check.file, c.check.trn, c.check.date, c.check.payerId, c.check.payeeId, c.id, c.status,
+                    c.chargeText, c.paidText, c.prText, c.payerCtl,
+                    n.toString(), lineCharge, linePaid, claimAdjTotal, lineAdjTotal,
+                ) + groupCells + listOf(
+                    if (diff != null) Money.fmt(diff) else "", yn(diff?.let { it == 0L }), yn(c.linesPaidOk), yn(c.hasInvalid),
+                )
+            )
+        )
+    }
+
+    private fun writeAdjRows(w: BufferedWriter, c: RemitClaim) {
+        fun row(level: String, lineNo: String, code: String, a: Adj, valid: Boolean) = w.write(
+            Csv.line(
+                listOf(
+                    c.check.file, c.check.trn, c.id, level, lineNo, code, a.group, a.reason,
+                    if (valid) Money.fmt(a.amount) else a.raw,
+                )
+            )
+        )
+        for (a in c.adjs) row("claim", "", "", a, true)
+        for (a in c.badAdjs) row("claim", "", "", a, false)
+        c.lines.forEachIndexed { i, l ->
+            for (a in l.adjs) row("line", (i + 1).toString(), l.code, a, true)
+            for (a in l.badAdjs) row("line", (i + 1).toString(), l.code, a, false)
+        }
+    }
+
+    fun run(
+        files: List<Path>, profile: Profile, csvPath: String?, rollupPath: String?,
+        claimsPath: String? = null, adjustmentsPath: String? = null,
+    ): RemitSummary {
         val sum = RemitSummary()
         var of: OutFile? = null
         var rof: OutFile? = null
+        var cof: OutFile? = null
+        var aof: OutFile? = null
         try {
+            if (claimsPath != null) {
+                cof = Csv.open(claimsPath)
+                cof.w.write(Csv.line(CLAIMS_HEADER))
+            }
+            if (adjustmentsPath != null) {
+                aof = Csv.open(adjustmentsPath)
+                aof.w.write(Csv.line(ADJ_HEADER))
+            }
+            val cw = cof?.w
+            val aw = aof?.w
             if (csvPath != null) {
                 of = Csv.open(csvPath)
                 of.w.write(Csv.line(HEADER))
@@ -264,6 +351,8 @@ object RemitCmd {
                     if (c.prOk) sum.patientResp += c.patientResp else sum.invalidAmounts++
                     for (a in c.adjs) bump(sum, a)
                     for (l in c.lines) for (a in l.adjs) bump(sum, a)
+                    if (cw != null) writeClaimRow(cw, c)
+                    if (aw != null) writeAdjRows(aw, c)
                     val claimAdj = c.adjs.joinToString("|") { it.text() }
                     val base = listOf(
                         c.check.file, c.check.trn, c.check.date, c.check.payerId, c.check.payeeId, c.id, c.status,
@@ -304,9 +393,13 @@ object RemitCmd {
             }
             of?.commit()
             rof?.commit()
+            cof?.commit()
+            aof?.commit()
         } finally {
             of?.abort()
             rof?.abort()
+            cof?.abort()
+            aof?.abort()
         }
         return sum
     }

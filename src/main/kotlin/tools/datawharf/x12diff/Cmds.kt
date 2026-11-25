@@ -137,14 +137,17 @@ private fun zeroMembers(sum: DiffSummary, oldName: String, newName: String, out:
 }
 
 internal fun cmdRemit(a: List<String>, out: PrintStream, err: PrintStream): Int {
-    val o = parseOpts(a, setOf("--csv", "--rollup", "--profile", "--show"), setOf("--allow-incomplete"))
-    if (o.pos.isEmpty()) throw X12Exception("Usage: x12diff remit FILE_OR_DIR... [--csv lines.csv] [--rollup adjustments.csv] [--profile p.properties]")
+    val o = parseOpts(a, setOf("--csv", "--rollup", "--claims", "--adjustments", "--profile", "--show"), setOf("--allow-incomplete"))
+    if (o.pos.isEmpty()) throw X12Exception("Usage: x12diff remit FILE_OR_DIR... [--csv lines.csv] [--rollup rollup.csv] [--claims claims.csv] [--adjustments adjustments.csv] [--profile p.properties]")
     val profile = profileOpt(o, out, err)
     val showN = showOpt(o)
     val skipped = ArrayList<String>()
     val files = expandInputs(o.pos, skipped)
-    checkOutputsAndInputs(listOf("--csv" to o.flags["--csv"], "--rollup" to o.flags["--rollup"]), o.pos, files)
-    val s = RemitCmd.run(files, profile, o.flags["--csv"], o.flags["--rollup"])
+    checkOutputsAndInputs(
+        listOf("--csv" to o.flags["--csv"], "--rollup" to o.flags["--rollup"], "--claims" to o.flags["--claims"], "--adjustments" to o.flags["--adjustments"]),
+        o.pos, files,
+    )
+    val s = RemitCmd.run(files, profile, o.flags["--csv"], o.flags["--rollup"], o.flags["--claims"], o.flags["--adjustments"])
     skippedNote(skipped, out)
     out.println("Files: ${fmt(s.files.toLong())}   835 checks: ${fmt(s.checks)}")
     out.println("Claims: ${fmt(s.claims)}   Service lines: ${fmt(s.lines)}")
@@ -163,6 +166,8 @@ internal fun cmdRemit(a: List<String>, out: PrintStream, err: PrintStream): Int 
     if (s.warningCount > showN) out.println("  ... ${fmt(s.warningCount - showN)} more not shown")
     o.flags["--csv"]?.let { out.println("CSV written: $it") }
     o.flags["--rollup"]?.let { out.println("Rollup written: $it") }
+    o.flags["--claims"]?.let { out.println("Claims written: $it") }
+    o.flags["--adjustments"]?.let { out.println("Adjustments written: $it") }
     return if (envelopeProblems(s.envelope, out, err, o.flags.containsKey("--allow-incomplete"))) 3 else 0
 }
 

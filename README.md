@@ -151,6 +151,15 @@ Warnings: 0
 
 `lines.csv` columns: `file, check_number, payment_date, payer_id, payee_id, claim_id, claim_status, claim_charge, claim_paid, patient_resp, payer_claim_ctrl, service_qualifier, service_code, service_modifiers, units, line_charge, line_paid, line_adjustments, claim_adjustments`. Adjustments are written as `GROUP:REASON:AMOUNT` and joined with `|`, so a line with several adjustments stays on one row. Claim-level adjustments repeat on each line of the claim. `payer_id` is N1*PR element 4, or REF*2U element 2 when that is empty.
 
+Two more outputs give finished tables, so an Excel workbook can load them directly instead of grouping 100,000 service lines in Power Query:
+
+```
+x12diff remit remits_1.835 --claims claims.csv --adjustments adj.csv
+```
+
+- `--claims`: one row per claim (the unit the console `Claims:` count uses). Columns: `file, check_number, payment_date, payer_id, payee_id, claim_id, claim_status, claim_charge, claim_paid, patient_resp, payer_claim_ctrl, line_count, line_charge_total, line_paid_total, claim_adj_total, line_adj_total, adj_CO, adj_PR, adj_OA, adj_PI, adj_CR, balance_diff, balance_ok, lines_paid_ok, has_invalid_amount`. `balance_diff` is charge - paid - (claim-level + line-level adjustments), the same figure the balance warning reports. The `adj_` columns add the claim-level and line-level amounts of that group (other groups appear only in the two totals). `line_count` is 0 for a claim with no service lines. `balance_ok`, `lines_paid_ok` and `has_invalid_amount` are Y or N; `balance_ok` and `lines_paid_ok` are blank when the check could not run (an amount is not valid), and `lines_paid_ok` and the line totals are also blank when the claim has no lines. A group total is blank when one of its adjustment amounts is not valid. A blank `patient_resp` stays blank. An invalid amount keeps its raw text and is never written as 0.
+- `--adjustments`: one row per adjustment. Columns: `file, check_number, claim_id, level, line_no, service_code, group, reason, amount`. `level` is `claim` or `line`. A claim-level adjustment is written once per claim, not once per line (`line_no` and `service_code` are blank); `line_no` counts the service lines of the claim from 1. An invalid amount keeps its raw text. Summed by group and reason, the amounts equal the `--rollup` file and the console rollup.
+
 Checks, reported as warnings with the check number and claim ID:
 
 - per claim: charge - paid - (claim-level adjustments + line-level adjustments) must be zero, and the service-line paid amounts must add up to the claim paid amount, or to that amount plus the claim-level adjustments;

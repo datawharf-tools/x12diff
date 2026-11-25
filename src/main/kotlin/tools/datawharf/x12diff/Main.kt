@@ -14,7 +14,7 @@ x12diff $VERSION - offline X12 inspector, 834 member diff, 835 remit and claim r
 Usage:
   x12diff parse FILE [--allow-incomplete]
   x12diff diff OLD NEW [--csv out.csv] [--profile p.properties] [--mode full|change] [--show N] [--stats] [--allow-incomplete]
-  x12diff remit FILE_OR_DIR... [--csv lines.csv] [--rollup adjustments.csv] [--profile p.properties] [--show N] [--allow-incomplete]
+  x12diff remit FILE_OR_DIR... [--csv lines.csv] [--rollup rollup.csv] [--claims claims.csv] [--adjustments adjustments.csv] [--profile p.properties] [--show N] [--allow-incomplete]
   x12diff recon FILE_OR_DIR... [--csv claims.csv] [--profile p.properties] [--asof YYYYMMDD] [--show N] [--stats] [--allow-incomplete]
   x12diff gen --members N --old OLD --new NEW [--seed S] [--newlines] [--sets K]
   x12diff gen --kind claims --claims N --dir DIR [--seed S] [--newlines] [--set-size K] [--reject-set N]...
